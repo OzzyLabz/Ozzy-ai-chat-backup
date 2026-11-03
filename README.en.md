@@ -9,7 +9,7 @@ English · [Русский](README.md)
 
 > 🧠 Your AI chats — as plain Markdown files. On your Mac. No internet needed.
 
-**⬇️ [Download the app for Intel and Apple Silicon (ZIP)](https://github.com/OzzyLabz/ozzy-ai-chat-backup/releases/download/v1.0/Ozzy-AI-Chat-Backup-1.0-universal.zip)**
+**⬇️ [Download the app for Intel and Apple Silicon (DMG)](https://github.com/OzzyLabz/ozzy-ai-chat-backup/releases/download/v1.0/Ozzy-AI-Chat-Backup-1.0.dmg)**
 
 ---
 
@@ -86,7 +86,7 @@ At the top of each file are the date, time, project and session number as proper
 
 ## 📦 Installation and first launch
 
-1. Download the archive, unzip it and move «Бэкап ИИ.app» to the Applications folder.
+1. Download the DMG, open it and drag «Бэкап ИИ» to the Applications folder.
 2. ⚠️ The app has only an ad hoc signature and is not notarized by Apple. On first launch macOS may warn about an unidentified developer — then open it via **System Settings → Privacy & Security**. Details: [Apple's guide](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac).
 3. On first launch, choose a folder for the archive and click «Начать» ("Start"). 🎉
 
