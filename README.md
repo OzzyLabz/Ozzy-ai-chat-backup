@@ -9,7 +9,7 @@
 
 > 🧠 Твои переписки с ИИ — в обычных файлах Markdown. На твоём Mac. Без интернета.
 
-**⬇️ [Скачать приложение для Intel и Apple Silicon (DMG)](https://github.com/OzzyLabz/ozzy-ai-chat-backup/releases/download/v1.0/Ozzy-AI-Chat-Backup-1.0.dmg)**
+**⬇️ [Скачать приложение для Intel и Apple Silicon (DMG)](https://github.com/OzzyLabz/ozzy-ai-chat-backup/releases/latest)**
 
 ---
 

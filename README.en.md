@@ -9,7 +9,7 @@ English · [Русский](README.md)
 
 > 🧠 Your AI chats — as plain Markdown files. On your Mac. No internet needed.
 
-**⬇️ [Download the app for Intel and Apple Silicon (DMG)](https://github.com/OzzyLabz/ozzy-ai-chat-backup/releases/download/v1.0/Ozzy-AI-Chat-Backup-1.0.dmg)**
+**⬇️ [Download the app for Intel and Apple Silicon (DMG)](https://github.com/OzzyLabz/ozzy-ai-chat-backup/releases/latest)**
 
 ---
 
