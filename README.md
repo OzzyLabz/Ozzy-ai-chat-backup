@@ -134,7 +134,7 @@
 
 ## 🛠️ Исходники и сборка
 
-Исходники — в `Sources/`, ресурсы — в `Resources/`. Сборка: `./build.sh` → `dist/Бэкап ИИ.app` (Swift, `swiftc` под две архитектуры и `lipo`, без проекта Xcode). Проверено с установленным Xcode.
+Исходники — в `Sources/`, ресурсы — в `Resources/`. Сборка: `./build.sh` → `dist/Бэкап ИИ.app` (Swift, `swiftc` под две архитектуры и `lipo`, без проекта Xcode). Проверено с установленным Xcode. DMG: `./make-dmg.sh`.
 
 Встроенный распаковщик `zstd` собран из официальных исходников [facebook/zstd](https://github.com/facebook/zstd) 1.5.7. Сторонние компоненты и их лицензии: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

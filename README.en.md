@@ -136,7 +136,7 @@ To turn it off completely: in the app, switch off «Автосохранение
 
 ## 🛠️ Source and build
 
-Source code is in `Sources/`, resources in `Resources/`. Build: `./build.sh` → `dist/Бэкап ИИ.app` (Swift, `swiftc` for two architectures and `lipo`, no Xcode project). Tested with Xcode installed.
+Source code is in `Sources/`, resources in `Resources/`. Build: `./build.sh` → `dist/Бэкап ИИ.app` (Swift, `swiftc` for two architectures and `lipo`, no Xcode project). Tested with Xcode installed. DMG: `./make-dmg.sh`.
 
 The bundled `zstd` decompressor is built from the official [facebook/zstd](https://github.com/facebook/zstd) 1.5.7 sources. Third-party components and their licenses: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
