@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 # --- Настройки этой программы ---
 APP="$ROOT/../Бэкап ИИ/dist/Бэкап ИИ.app"
 VOL="Бэкап ИИ"
-OUT_NAME="Ozzy-AI-Chat-Backup-$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist").dmg"
+OUT_NAME="Ozzy-AI-Chat-Backup.dmg"
 ICON_Y=300
 EXTRA=""
 # --------------------------------
