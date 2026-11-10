@@ -7,19 +7,31 @@ import UniformTypeIdentifiers
 enum Main {
     static func main() {
         let args = CommandLine.arguments
+        if Build.demo && (args.contains("--export") || args.contains("--import") || args.contains("--check") || args.contains("--test-notification")) {
+            print(tr("Тестовая сборка: сохранение, импорт и проверка отключены."))
+            return
+        }
+        if Build.demo { Demo.ensure() }
+        Lang.captureLaunchMenuLanguage()
+        Lang.apply(AppConfig.load().language)
+        Lang.syncSystemMenus(AppConfig.load().language)
         if args.contains("--check") {
             print(Exporter.checkFormat(AppConfig.load()))
             return
         }
         if args.contains("--test-notification") {
-            let ok = Notifier.post("Бэкап ИИ — проверка уведомлений", "Так будет выглядеть сообщение о проблеме. Нажмите, чтобы открыть программу.")
-            print(ok ? "отправлено от имени программы" : "уведомления программе не разрешены — отправлено запасным способом")
+            let ok = Notifier.post(tr("Бэкап ИИ — проверка уведомлений"), tr("Так будет выглядеть сообщение о проблеме. Нажмите, чтобы открыть программу."))
+            print(ok ? tr("отправлено от имени программы") : tr("уведомления программе не разрешены — отправлено запасным способом"))
             return
         }
         if let i = args.firstIndex(of: "--import"), i + 1 < args.count {
             let r = WebImport.run(URL(fileURLWithPath: args[i + 1]))
             print(r.message)
             if !r.ok { return }
+        }
+        if args.contains("--kit") || args.contains("--kit-preview") {
+            Headless.kit(args)
+            return
         }
         if args.contains("--export") || args.contains("--import") {
             Headless.run(args)
@@ -35,15 +47,24 @@ enum Main {
 
 // Запуск без окна: от расписания (--auto) или из терминала.
 enum Headless {
+    // Служебные слова в уже сохранённых файлах — на языке программы (если язык меняли).
+    static func syncArchiveLang(_ config: inout AppConfig) {
+        guard !Build.demo, let lang = ArchiveLang.ensure(config) else { return }
+        config.archiveLang = lang
+        var saved = AppConfig.load(); saved.archiveLang = lang; saved.save()
+    }
+
     static func run(_ args: [String]) {
         var config = AppConfig.load()
+        syncArchiveLang(&config)
+        if !Build.demo, config.pinKitFolder() { var saved = AppConfig.load(); saved.kitFolder = config.kitFolder; saved.save() }
         if let i = args.firstIndex(of: "--archive"), i + 1 < args.count {
             config.archivePath = args[i + 1]
             config.setupDone = true
         }
         if let i = args.firstIndex(of: "--name"), i + 1 < args.count { config.userName = args[i + 1] }
         guard config.setupDone else {
-            print("Программа ещё не настроена: откройте её и выберите папку архива.")
+            print(tr("Программа ещё не настроена: откройте её и выберите папку архива."))
             return
         }
         let auto = args.contains("--auto")
@@ -59,12 +80,41 @@ enum Headless {
             exporter.rebuild = Set(args[i + 1].split(separator: ",").map(String.init))
         }
         let result = exporter.run()
-        print("\(Fmt.full.string(from: Date())) \(trigger.title): \(result.status.level.mark) \(result.message)")
+        print("\(Fmt.full.string(from: Date())) \(trigger.title): \(result.status.level.mark) \(result.status.history.first?.shown ?? result.message)")
+        // Навыки и MCP — вместе с переписками, если так выбрано.
+        if config.kitEnabled && config.kitWithChats && !Build.demo {
+            let st = Kit.run(config, trigger: trigger)
+            print(tr("Навыки и MCP") + ": " + (st.history.first.map { $0.shown } ?? ""))
+        }
         if auto { ExportReminder.checkAndNotify() }
         if auto, config.notify, result.status.level == .warn || result.status.level == .err {
             let what = advice(for: result.status)?.what ?? result.message
-            Notifier.post("Бэкап ИИ — \(result.status.headline.lowercased())", what + " Нажмите, чтобы узнать, что делать.")
+            Notifier.post(tr("Бэкап ИИ") + " — \(result.status.headline.lowercased())", what + tr(" Нажмите, чтобы узнать, что делать."))
         }
+    }
+}
+
+extension Headless {
+    // --kit — сохранить навыки и MCP; --kit-preview — показать, что войдёт, без записи;
+    // --kit-folder <папка> — куда сохранять (для проверки); --auto — запуск по своему расписанию навыков.
+    static func kit(_ args: [String]) {
+        var config = AppConfig.load()
+        syncArchiveLang(&config)
+        if !Build.demo, config.pinKitFolder() { var saved = AppConfig.load(); saved.kitFolder = config.kitFolder; saved.save() }
+        var folder: URL?
+        if let i = args.firstIndex(of: "--kit-folder"), i + 1 < args.count { folder = URL(fileURLWithPath: args[i + 1], isDirectory: true) }
+        if let i = args.firstIndex(of: "--keys"), i + 1 < args.count { config.kitKeys = args[i + 1] }
+        if args.contains("--kit-preview") {
+            for (group, lines) in Kit.preview(config) {
+                print("\n" + group)
+                for l in lines { print("  \(l.icon) \(l.what)" + (l.path.isEmpty ? "" : "   \(l.path)")) }
+            }
+            return
+        }
+        if args.contains("--auto") { guard config.kitEnabled, !config.kitWithChats else { return } }
+        let st = Kit.run(config, trigger: args.contains("--auto") ? .schedule : .manual, folder: folder)
+        for r in st.history.prefix(while: { $0.date == st.lastRun }) { print("\(r.level.mark) \(r.who): \(r.shown)") }
+        for a in st.agents { print("  \(a.name): \(a.skills) / MCP \(a.mcp) / \(a.plugins) · \(a.path)") }
     }
 }
 
@@ -108,18 +158,16 @@ enum Palette {
 }
 
 extension Font {
+    // Название прежнее, но шрифт — по языку окна (Bellota, Baloo 2, M PLUS Rounded, ZCOOL KuaiLe).
     static func bellota(_ size: CGFloat, bold: Bool = true) -> Font {
-        .custom(bold ? "Bellota-Bold" : "Bellota-Regular", size: size)
+        Font(Lang.nsFont(size, bold: bold))
     }
 }
 
 func registerFonts() {
-    for name in ["Bellota-Bold", "Bellota-Regular"] {
-        if let url = Bundle.main.url(forResource: name, withExtension: "ttf", subdirectory: "Fonts")
-            ?? Bundle.main.url(forResource: name, withExtension: "ttf") {
-            CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
-        }
-    }
+    let urls = (Bundle.main.urls(forResourcesWithExtension: "ttf", subdirectory: "Fonts") ?? [])
+        + (Bundle.main.urls(forResourcesWithExtension: "ttf", subdirectory: nil) ?? [])
+    for url in urls { CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil) }
 }
 
 func resourceImage(_ name: String) -> NSImage {
@@ -128,18 +176,28 @@ func resourceImage(_ name: String) -> NSImage {
 }
 
 func plural(_ n: Int, _ one: String, _ few: String, _ many: String) -> String {
+    // Другие языки: в переводе «одна|много» (английский, хинди) или одна форма (китайский, японский).
+    if let t = Lang.lookup("\(one)|\(few)|\(many)") {
+        let parts = t.components(separatedBy: "|")
+        return parts.count > 1 && n != 1 ? parts[1] : parts[0]
+    }
     let m10 = n % 10, m100 = n % 100
     if m10 == 1 && m100 != 11 { return one }
     if (2...4).contains(m10) && !(12...14).contains(m100) { return few }
     return many
 }
 
+// «2 новых сегодня» — целой фразой: в китайском, японском и хинди порядок слов другой.
+func newTodayText(_ n: Int) -> String {
+    Lang.code == "ru" ? "\(n) \(plural(n, "новая", "новых", "новых")) сегодня" : trf("%d новых сегодня", n)
+}
+
 func whenText(_ date: Date) -> String {
     let cal = Calendar.current
-    let t = Fmt.time.string(from: date)
-    if cal.isDateInToday(date) { return "сегодня в \(t)" }
-    if cal.isDateInYesterday(date) { return "вчера в \(t)" }
-    return Fmt.dayTime.string(from: date).replacingOccurrences(of: " ", with: " в ")
+    let t = TimeFormat.time(date)
+    if cal.isDateInToday(date) { return trf("сегодня в %@", t) }
+    if cal.isDateInYesterday(date) { return trf("вчера в %@", t) }
+    return TimeFormat.day(date) + tr(" в ") + t
 }
 
 struct GlassButtonStyle: ButtonStyle {
@@ -176,7 +234,10 @@ struct GlassButtonStyle: ButtonStyle {
                 .shadow(color: Palette.purple.opacity(hover && enabled ? 0.35 : 0), radius: 8)
                 .opacity(enabled ? 1 : 0.55)
                 .contentShape(Rectangle())
-                .onHover { hover = $0 }
+                .onHover { inside in
+                    hover = inside
+                    if inside { NSCursor.arrow.set() }
+                }
                 .animation(.easeOut(duration: 0.15), value: hover)
         }
     }
@@ -222,7 +283,7 @@ struct OlegLogo: View {
                 if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
             }
             .onTapGesture(perform: action)
-            .help("Об авторе")
+            .help(tr("Об авторе"))
     }
 }
 
@@ -231,17 +292,73 @@ struct TrafficLights: View {
     var green: () -> Void
     var body: some View {
         HStack(spacing: 9) {
-            Button(action: close) { Dot(color: Color(red: 1, green: 0.28, blue: 0.27), size: 13) }.buttonStyle(.plain).help("Свернуть в строку меню")
-            Button(action: green) { Dot(color: Color(red: 0.14, green: 0.80, blue: 0.27), size: 13) }.buttonStyle(.plain).help("Подробности")
+            Button(action: close) { Dot(color: Color(red: 1, green: 0.28, blue: 0.27), size: 13) }.buttonStyle(.plain).help(tr("Свернуть в строку меню"))
+            Button(action: green) { Dot(color: Color(red: 0.14, green: 0.80, blue: 0.27), size: 13) }.buttonStyle(.plain).help(tr("Подробности"))
         }
     }
 }
 
 // Прокрутка с полосой в цветах программы. Полоса видна, только когда содержимое не помещается.
+// Ползунок можно тащить мышью, щелчок по дорожке перематывает туда.
+final class ScrollHandle { weak var view: NSScrollView? }
+
+struct ScrollFinder: NSViewRepresentable {
+    let handle: ScrollHandle
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { handle.view = v.enclosingScrollView }
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) {
+        if handle.view == nil { DispatchQueue.main.async { handle.view = v.enclosingScrollView } }
+    }
+}
+
+// Область полосы прокрутки: сама принимает нажатие и перетаскивание, поэтому окно (оно двигается за фон) не уезжает.
+struct BarDragArea: NSViewRepresentable {
+    var onDrag: (_ startY: CGFloat, _ y: CGFloat) -> Void
+    var onEnd: () -> Void
+    var onHover: (Bool) -> Void
+
+    func makeNSView(context: Context) -> DragView { let v = DragView(); v.owner = self; return v }
+    func updateNSView(_ v: DragView, context: Context) { v.owner = self }
+
+    final class DragView: NSView {
+        var owner: BarDragArea?
+        private var startY: CGFloat?
+        override var isFlipped: Bool { true }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        }
+        override func mouseEntered(with event: NSEvent) { owner?.onHover(true); NSCursor.arrow.set() }
+        override func mouseExited(with event: NSEvent) { owner?.onHover(false) }
+        private func y(_ e: NSEvent) -> CGFloat { convert(e.locationInWindow, from: nil).y }
+        override func mouseDown(with event: NSEvent) { let p = y(event); startY = p; owner?.onDrag(p, p) }
+        override func mouseDragged(with event: NSEvent) { if let s = startY { owner?.onDrag(s, y(event)) } }
+        override func mouseUp(with event: NSEvent) { startY = nil; owner?.onEnd() }
+    }
+}
+
 struct ThemedScroll<Content: View>: View {
     @ViewBuilder var content: () -> Content
     @State private var offset: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
+    @State private var handle = ScrollHandle()
+    @State private var dragStart: CGFloat?
+    @State private var hover = false
+    static var barWidth: CGFloat { 4 }
+    static var thumbGradient: LinearGradient {
+        LinearGradient(gradient: Gradient(stops: [
+            .init(color: Color(red: 39 / 255, green: 83 / 255, blue: 246 / 255), location: 0),
+            .init(color: Color(red: 75 / 255, green: 39 / 255, blue: 246 / 255), location: 0.45),
+            .init(color: Color(red: 118 / 255, green: 48 / 255, blue: 246 / 255), location: 0.8),
+            .init(color: Color(red: 252 / 255, green: 107 / 255, blue: 230 / 255), location: 1)
+        ]), startPoint: .top, endPoint: .bottom)
+    }
 
     var body: some View {
         GeometryReader { outer in
@@ -253,28 +370,46 @@ struct ThemedScroll<Content: View>: View {
                             .onAppear { offset = -frame.minY; contentHeight = frame.height }
                             .onChange(of: frame) { f in offset = -f.minY; contentHeight = f.height }
                     })
+                    .background(ScrollFinder(handle: handle))
             }
             .coordinateSpace(name: "themedScroll")
             .overlay(alignment: .topTrailing) {
                 let visible = outer.size.height
                 if contentHeight > visible + 1 {
-                    let thumb = max(36, visible * visible / contentHeight)
-                    let progress = min(max(offset / (contentHeight - visible), 0), 1)
+                    let thumb = max(30, visible * visible / contentHeight)
+                    let range = contentHeight - visible
+                    let progress = min(max(offset / range, 0), 1)
                     ZStack(alignment: .top) {
-                        Capsule().fill(Color.white.opacity(0.06)).frame(width: 6, height: visible)
-                        Capsule()
-                            .fill(LinearGradient(colors: [Color(red: 252 / 255, green: 107 / 255, blue: 230 / 255),
-                                                          Palette.purple,
-                                                          Color(red: 39 / 255, green: 83 / 255, blue: 246 / 255)],
-                                                 startPoint: .top, endPoint: .bottom))
-                            .frame(width: 6, height: thumb)
-                            .shadow(color: Palette.purple.opacity(0.6), radius: 4)
+                        Capsule().fill(Color.white.opacity(hover ? 0.09 : 0.05)).frame(width: Self.barWidth, height: visible)
+                        Capsule().fill(Self.thumbGradient)
+                            .frame(width: Self.barWidth, height: thumb)
+                            .shadow(color: Palette.purple.opacity(0.45), radius: 3)
                             .offset(y: (visible - thumb) * progress)
                     }
-                    .allowsHitTesting(false)
+                    .frame(width: 14, height: visible, alignment: .top)
+                    // Нажатие и перетаскивание ловит своя область: двигается только прокрутка, окно стоит на месте.
+                    .overlay(BarDragArea(onDrag: { startY, y in
+                        let thumbTop = (visible - thumb) * progress
+                        if dragStart == nil {
+                            // Нажали на ползунок — тащим за то место, где взяли; на дорожку — перематываем туда.
+                            let onThumb = startY >= thumbTop && startY <= thumbTop + thumb
+                            dragStart = onThumb ? startY - thumbTop : thumb / 2
+                        }
+                        let top = min(max(y - (dragStart ?? 0), 0), visible - thumb)
+                        scroll(to: (visible - thumb) > 0 ? top / (visible - thumb) * range : 0)
+                    }, onEnd: { dragStart = nil }, onHover: { hover = $0 }))
+                    .offset(x: 5)
                 }
             }
         }
+    }
+
+    private func scroll(to y: CGFloat) {
+        guard let sv = handle.view, let doc = sv.documentView else { return }
+        let maxY = max(doc.frame.height - sv.contentView.bounds.height, 0)
+        let target = doc.isFlipped ? min(max(y, 0), maxY) : maxY - min(max(y, 0), maxY)
+        sv.contentView.scroll(to: NSPoint(x: sv.contentView.bounds.origin.x, y: target))
+        sv.reflectScrolledClipView(sv.contentView)
     }
 }
 
@@ -290,6 +425,53 @@ final class ViewModel: ObservableObject {
     @Published var loginEnabled = LoginItem.isEnabled
     @Published var retentionDays = ClaudeRetention.days
     @Published var setupPath = AppConfig.load().archivePath ?? AppConfig.defaultArchivePath()
+    @Published var tab = 0                      // 0 — «Переписки», 1 — «Навыки и настройки»
+    @Published var agents: [DemoAgent] = Build.demo ? Demo.agents(Demo.agentCount) : []
+    @Published var kitHistory: [DemoChange] = Build.demo ? Demo.kitHistory(Demo.historyCount) : []
+    @Published var showWhat = false
+    @Published var message: Message?
+    @Published var showAuthor = false
+    @Published var kitBusy = false
+    let addSourceMenu = MenuActions()
+    var onShow: (() -> Void)?
+    var onLanguage: (() -> Void)?
+    var onBeforeRelaunch: (() -> Void)?
+    @Published var updateAvailable = false
+    @Published var updateChecking = false
+    @Published var lastUpdateCheck: Date?
+    @Published var installing: Double = 0
+    @Published var updateVersion = ""
+    @Published var updateNotes: [String] = []
+
+    func setLanguage(_ v: String) {
+        Lang.apply(v)                 // сначала язык, чтобы окно сразу строилось на нём
+        Lang.syncSystemMenus(v)       // системные пункты меню macOS — тоже на языке программы (после перезапуска)
+        update { $0.language = v }
+        onLanguage?()
+        objectWillChange.send()
+        // Название программы в строке меню, системные пункты меню и системные части окон macOS берёт
+        // только при запуске. Поэтому после смены языка программа перезапускается и открывается на том же месте.
+        if Lang.menuNeedsRestart {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.relaunch() }
+        }
+    }
+
+    // Перезапуск программы: системные пункты меню macOS переводятся только при запуске.
+    func relaunch() {
+        onBeforeRelaunch?()   // запомнить, где стоит окно
+        let path = Bundle.main.bundlePath.replacingOccurrences(of: "'", with: "'\\''")
+        let reopen = expanded ? " --args --reopen-details --tab \(tab)" : " --args --reopen"
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 1; /usr/bin/open '\(path)'" + reopen]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
+
+    // Тестовая сборка: действия, которые в настоящей программе читают или пишут данные, только показывают окошко.
+    func demoOnly(_ what: String) {
+        alert(tr("Тестовая сборка"), trf("«%@» — в тестовой сборке действие не выполняется. Данные вымышленные, настоящие файлы не трогаются.", tr(what)))
+    }
 
     var onResize: (() -> Void)?
     var onAbout: (() -> Void)?
@@ -333,21 +515,22 @@ final class ViewModel: ObservableObject {
     }
 
     var nextRunText: String {
-        guard config.autoEnabled else { return "автосохранение выключено" }
+        guard config.autoEnabled else { return tr("автосохранение выключено") }
         let cal = Calendar.current
         let now = Date()
         var next = cal.date(bySettingHour: config.hour, minute: config.minute, second: 0, of: now) ?? now
         if next <= now { next = cal.date(byAdding: .day, value: 1, to: next) ?? next }
-        let t = Fmt.time.string(from: next)
-        return cal.isDateInToday(next) ? "следующее сегодня в \(t)" : "следующее завтра в \(t)"
+        let t = TimeFormat.time(next)
+        return cal.isDateInToday(next) ? trf("следующее сегодня в %@", t) : trf("следующее завтра в %@", t)
     }
 
     var lastRunText: String {
-        guard let r = status.history.first else { return "ещё не сохранялось" }
+        guard let r = status.history.first else { return tr("ещё не сохранялось") }
         return "\(whenText(r.date).capitalizedFirst) · \(r.trigger.title)"
     }
 
     func saveNow() {
+        if Build.demo { demoOnly(tr("Сохранить сейчас")); return }
         guard !busy else { return }
         busy = true
         let c = config
@@ -356,18 +539,19 @@ final class ViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.busy = false
                 self.status = r.status
-                if r.message == "Сохранение уже идёт" { self.alert("Сохранение уже идёт", "Подождите, пока закончится текущее сохранение.") }
+                if r.message == "Сохранение уже идёт" { self.alert(tr("Сохранение уже идёт"), tr("Подождите, пока закончится текущее сохранение.")) }
             }
         }
     }
 
     func checkFormat() {
+        if Build.demo { demoOnly(tr("Проверить формат")); return }
         busy = true
         DispatchQueue.global(qos: .userInitiated).async {
             let text = Exporter.checkFormat(self.config)
             DispatchQueue.main.async {
                 self.busy = false
-                self.alert("Проверка формата", text)
+                self.alert(tr("Проверка формата"), text)
             }
         }
     }
@@ -383,7 +567,7 @@ final class ViewModel: ObservableObject {
             switch id {
             case "com.microsoft.VSCode": return "VS Code"
             case "info.filesmanager.Files": return "Commander"
-            case "com.apple.Terminal": return "Терминале"
+            case "com.apple.Terminal": return tr("Терминале")
             default: return name
             }
         }
@@ -442,7 +626,7 @@ final class ViewModel: ObservableObject {
             NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration()) { _, error in
                 guard error != nil else { return }
                 DispatchQueue.main.async {
-                    self.alert("Не открылось в \(target.name)", "Похоже, эта программа не умеет открывать папки. Выберите другую в «Подробностях» → «Папка архива».")
+                    self.alert(trf("Не открылось в %@", target.name), tr("Похоже, эта программа не умеет открывать папки. Выберите другую в «Подробностях» → «Папка архива»."))
                 }
             }
         }
@@ -452,8 +636,8 @@ final class ViewModel: ObservableObject {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
-        panel.prompt = "Выбрать"
-        panel.message = "Программа, в которой открывать архив"
+        panel.prompt = tr("Выбрать")
+        panel.message = tr("Программа, в которой открывать архив")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let id = Bundle(url: url)?.bundleIdentifier
         update {
@@ -467,11 +651,11 @@ final class ViewModel: ObservableObject {
     }
 
     func openJournal() {
-        let url = config.archiveURL.appendingPathComponent("Журнал сохранений.md")
+        let url = config.archiveURL.appendingPathComponent(AW.journalFile)
         if FileManager.default.fileExists(atPath: url.path) {
             NSWorkspace.shared.open(url)
         } else {
-            alert("Журнал пока пуст", "Он появится после первого сохранения.")
+            alert(tr("Журнал пока пуст"), tr("Он появится после первого сохранения."))
         }
     }
 
@@ -489,7 +673,7 @@ final class ViewModel: ObservableObject {
         func encode(_ s: String) -> String {
             s.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~/")) ?? s
         }
-        let journal = config.archiveURL.appendingPathComponent("Журнал сохранений.md")
+        let journal = config.archiveURL.appendingPathComponent(AW.journalFile)
         var link = "obsidian://open"
         if FileManager.default.fileExists(atPath: journal.path) {
             link += "?path=" + encode(journal.path)
@@ -512,8 +696,8 @@ final class ViewModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Выбрать"
-        panel.message = "Папка, куда сохранять историю переписок"
+        panel.prompt = tr("Выбрать")
+        panel.message = tr("Папка, куда сохранять историю переписок")
         panel.directoryURL = URL(fileURLWithPath: setup ? setupPath : config.archiveURL.path).deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         if setup { setupPath = url.path } else { update { $0.archivePath = url.path } }
@@ -529,7 +713,7 @@ final class ViewModel: ObservableObject {
     }
 
     func setLogin(_ on: Bool) {
-        if let error = LoginItem.set(on) { alert("Не удалось изменить автозапуск", error) }
+        if let error = LoginItem.set(on) { alert(tr("Не удалось изменить автозапуск"), error) }
         loginEnabled = LoginItem.isEnabled
         update { $0.loginWanted = on }
     }
@@ -541,17 +725,20 @@ final class ViewModel: ObservableObject {
         loginEnabled = LoginItem.isEnabled
     }
 
-    func extendRetention() {
-        if let error = ClaudeRetention.extend() { alert("Не удалось изменить настройку Claude Code", error) }
+    func extendRetention() { setRetention(ClaudeRetention.wanted) }
+
+    func setRetention(_ days: Int) {
+        if let error = ClaudeRetention.set(days) { alert(tr("Не удалось изменить настройку Claude Code"), error) }
         retentionDays = ClaudeRetention.days
     }
 
     func writeAuthor(about problem: String) {
+        if Build.demo { demoOnly(tr("Написать автору")); return }
         var c = URLComponents()
         c.scheme = "mailto"
         c.path = "samo.zlo.spb@gmail.com"
-        c.queryItems = [URLQueryItem(name: "subject", value: "Бэкап ИИ: проблема"),
-                        URLQueryItem(name: "body", value: "\(problem)\n\nЖурнал: \(status.history.first?.summary ?? "")\n")]
+        c.queryItems = [URLQueryItem(name: "subject", value: tr("Бэкап ИИ: проблема")),
+                        URLQueryItem(name: "body", value: "\(problem)\n\n" + tr("Журнал") + ": \(status.history.first?.summary ?? "")\n")]
         if let url = c.url { NSWorkspace.shared.open(url) }
     }
 
@@ -571,12 +758,13 @@ final class ViewModel: ObservableObject {
 
     // Новый путь проверяем сразу: нашлись ли там переписки этой программы.
     func changePath(_ kind: SourceKind) {
+        if Build.demo { demoOnly(tr("Изменить путь…")); return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.showsHiddenFiles = true
-        panel.prompt = "Выбрать"
-        panel.message = "Папка, где \(kind.title) хранит переписки"
+        panel.prompt = tr("Выбрать")
+        panel.message = trf("Папка, где %@ хранит переписки", kind.title)
         panel.directoryURL = URL(fileURLWithPath: config.path(kind)).deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
         var test = config
@@ -584,28 +772,59 @@ final class ViewModel: ObservableObject {
         let scan = Exporter.scan(kind, test)
         if scan.found && !scan.refs.isEmpty {
             update { $0.sourcePaths[kind.rawValue] = url.path }
-            alert("\(kind.title): ✅ найдено", "\(scan.refs.count) \(plural(scan.refs.count, "переписка", "переписки", "переписок")). Они сохранятся при следующем сохранении.")
+            alert(trf("%@: ✅ найдено", kind.title), "\(scan.refs.count) \(plural(scan.refs.count, "переписка", "переписки", "переписок")). " + tr("Они сохранятся при следующем сохранении."))
         } else {
-            let a = NSAlert()
-            a.messageText = "\(kind.title): ❌ здесь нет переписок"
-            a.informativeText = "В папке \(Fmt.shortPath(url.path)) не найдено переписок \(kind.title). Всё равно использовать её?"
-            a.addButton(withTitle: "Отмена")
-            a.addButton(withTitle: "Использовать")
-            if a.runModal() == .alertSecondButtonReturn { update { $0.sourcePaths[kind.rawValue] = url.path } }
+            let path = url.path
+            askNoChats(kind, path) { [weak self] in self?.update { $0.sourcePaths[kind.rawValue] = path } }
         }
+    }
+
+    // Окно в стиле программы: в выбранной папке нет переписок — всё равно использовать?
+    func askNoChats(_ kind: SourceKind, _ path: String, use: @escaping () -> Void) {
+        onShow?()
+        message = Message(title: trf("%@: ❌ здесь нет переписок", kind.title),
+                          text: trf("В папке %@ не найдено переписок %@. Всё равно использовать её?", Fmt.shortPath(path), kind.title),
+                          buttons: [MsgButton(title: tr("Отмена")),
+                                    MsgButton(title: tr("Использовать"), accent: true) { _ in use() }])
+    }
+
+    // Окно в стиле программы: как назвать папку с экспортами .md в архиве. В поле — имя папки, его можно поменять.
+    func askFolderName(_ folderName: String, text: String? = nil, add: @escaping (String) -> Void) {
+        onShow?()
+        message = Message(title: tr("Как назвать эту папку в архиве?"),
+                          text: text ?? tr("Так будет называться раздел в «Истории ИИ»."),
+                          buttons: [MsgButton(title: tr("Отмена")),
+                                    MsgButton(title: tr("Добавить"), accent: true) { v in
+                                        let name = v.trimmingCharacters(in: .whitespaces)
+                                        add(name.isEmpty ? folderName : name)
+                                    }],
+                          field: folderName)
+    }
+
+    // «Добавить программу…» в «Источниках»: поддерживаемые программы, которых нет в списке, — выбрать и указать папку.
+    func addSourceProgram() {
+        if Build.demo { demoOnly(tr("Добавить программу…")); return }
+        let shown = Set(visibleSources.compactMap { $0.kind })
+        let rest = SourceKind.allCases.filter { !$0.isWebExport && !shown.contains($0.rawValue) }
+        guard !rest.isEmpty else {
+            alert(tr("Добавить программу"), tr("Все поддерживаемые программы уже в списке. Если программа стоит в необычном месте, нажмите у неё «Изменить путь…»."))
+            return
+        }
+        popMenu(rest.map { k in (k.title, false, { [weak self] in self?.changePath(k) }) }, target: addSourceMenu)
     }
 
     func resetPath(_ kind: SourceKind) { update { $0.sourcePaths.removeValue(forKey: kind.rawValue) } }
 
     func importExport(_ url: URL? = nil) {
+        if Build.demo { demoOnly(tr("Импортировать экспорт")); return }
         var file = url
         if file == nil {
             let panel = NSOpenPanel()
             panel.canChooseDirectories = true
             panel.canChooseFiles = true
             panel.allowedContentTypes = [.zip, .json, .folder]
-            panel.prompt = "Импортировать"
-            panel.message = "Скачанный экспорт claude.ai или ChatGPT (ZIP-архив или распакованная папка)"
+            panel.prompt = tr("Импортировать")
+            panel.message = tr("Скачанный экспорт claude.ai или ChatGPT (ZIP-архив или распакованная папка)")
             panel.directoryURL = Paths.home.appendingPathComponent("Downloads")
             guard panel.runModal() == .OK else { return }
             file = panel.url
@@ -619,36 +838,29 @@ final class ViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.busy = false
                 if let saved { self.status = saved.status }
-                self.alert(r.ok ? "Экспорт импортирован" : "Не получилось импортировать", r.message + (saved.map { "\nСохранение: \($0.message)" } ?? ""))
+                self.alert(r.ok ? tr("Экспорт импортирован") : tr("Не получилось импортировать"), r.message + (saved.map { "\n" + tr("Сохранение") + ": \($0.message)" } ?? ""))
             }
         }
     }
 
     func exportHelp() {
-        alert("Как скачать экспорт",
-              "claude.ai: сайт или Claude Desktop → Настройки → Конфиденциальность → Export data. Ссылка придёт на почту, действует 24 часа.\n\nChatGPT: Settings → Data controls → Export data. Письмо может прийти не сразу (до 7 дней), ссылка действует 24 часа.\n\nСкачанный ZIP перетащите в окно программы или нажмите «Импортировать экспорт…». Повторный импорт добавляет новое, старое не теряется.")
+        alert(tr("Как скачать экспорт"),
+              tr("claude.ai: сайт или Claude Desktop → Настройки → Конфиденциальность → Export data. Ссылка придёт на почту, действует 24 часа.\n\nChatGPT: Settings → Data controls → Export data. Письмо может прийти не сразу (до 7 дней), ссылка действует 24 часа.\n\nСкачанный ZIP перетащите в окно программы или нажмите «Импортировать экспорт…». Повторный импорт добавляет новое, старое не теряется."))
     }
 
     func addMDFolder() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.prompt = "Добавить"
-        panel.message = "Папка, куда вы сохраняете экспорты чатов в .md (Cursor, Windsurf и другие)"
+        panel.prompt = tr("Добавить")
+        panel.message = tr("Папка, куда вы сохраняете экспорты чатов в .md (Cursor, Windsurf и другие)")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        let a = NSAlert()
-        a.messageText = "Как назвать эту папку в архиве?"
-        a.informativeText = "Так будет называться раздел в «История ИИ»."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.stringValue = url.lastPathComponent
-        a.accessoryView = field
-        a.addButton(withTitle: "Добавить")
-        a.addButton(withTitle: "Отмена")
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        let name = field.stringValue.trimmingCharacters(in: .whitespaces).isEmpty ? url.lastPathComponent : field.stringValue
-        update { c in
-            c.mdFolders.removeAll { $0.path == url.path }
-            c.mdFolders.append(MDFolder(name: name, path: url.path))
+        let path = url.path
+        askFolderName(url.lastPathComponent) { [weak self] name in
+            self?.update { c in
+                c.mdFolders.removeAll { $0.path == path }
+                c.mdFolders.append(MDFolder(name: name, path: path))
+            }
         }
     }
 
@@ -659,11 +871,11 @@ final class ViewModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
-        panel.prompt = "Выбрать"
-        panel.message = "Вторая папка для копии архива: внешний диск или папка облака"
+        panel.prompt = tr("Выбрать")
+        panel.message = tr("Вторая папка для копии архива: внешний диск или папка облака")
         guard panel.runModal() == .OK, let url = panel.url else { return }
         if url.path.hasPrefix(config.archiveURL.path) {
-            alert("Эта папка внутри архива", "Выберите папку вне «\(config.archiveURL.lastPathComponent)» — иначе копия будет копировать саму себя.")
+            alert(tr("Эта папка внутри архива"), trf("Выберите папку вне «%@» — иначе копия будет копировать саму себя.", config.archiveURL.lastPathComponent))
             return
         }
         update { $0.mirrorPath = url.appendingPathComponent("История ИИ (копия)").path }
@@ -671,12 +883,10 @@ final class ViewModel: ObservableObject {
 
     func clearMirror() { update { $0.mirrorPath = nil } }
 
+    // Сообщение — в окне программы, её шрифтом и цветами (не системное окно macOS).
     func alert(_ title: String, _ text: String) {
-        let a = NSAlert()
-        a.messageText = title
-        a.informativeText = text
-        a.addButton(withTitle: "Понятно")
-        a.runModal()
+        onShow?()
+        message = Message(title: title, text: text)
     }
 }
 
@@ -686,7 +896,7 @@ extension String {
 
 // MARK: - Что случилось и что делать
 
-enum FixAction { case save, folder, journal, author, check }
+enum FixAction { case save, folder, journal, author, check, path }
 
 struct Advice {
     var what: String
@@ -698,59 +908,59 @@ struct Advice {
 func advice(for status: AppStatus) -> Advice? {
     guard status.level == .warn || status.level == .err else { return nil }
     let summary = status.history.first?.summary ?? ""
-    let source = status.sources.first { $0.level == .err || $0.level == .warn }?.name ?? "Claude Code или Codex"
+    let source = status.sources.first { $0.level == .err || $0.level == .warn }?.name ?? tr("Claude Code или Codex")
     if summary.contains("Нет доступа к папке архива") {
-        return Advice(what: "Программа не смогла записать файлы в папку архива.",
-                      todo: "Проверьте, что папка существует и диск подключён. Если macOS спрашивала доступ к «Документам» — разрешите: Системные настройки → Конфиденциальность и безопасность → Файлы и папки → «Бэкап ИИ». Или выберите другую папку.",
+        return Advice(what: tr("Программа не смогла записать файлы в папку архива."),
+                      todo: tr("Проверьте, что папка существует и диск подключён. Если macOS спрашивала доступ к «Документам» — разрешите: Системные настройки → Конфиденциальность и безопасность → Файлы и папки → «Бэкап ИИ». Или выберите другую папку."),
                       actions: [.folder, .save])
     }
     if summary.contains("формат не понятен") {
-        return Advice(what: "\(source) изменил формат файлов переписок — скорее всего, после обновления. Уже сохранённый архив цел, но новые переписки не сохраняются.",
-                      todo: "Программу нужно поправить под новый формат. Напишите автору или попросите ИИ-помощника в папке проекта: «Бэкап ИИ: формат не понятен, поправь Sources/Exporter.swift».",
+        return Advice(what: trf("%@ изменил формат файлов переписок — скорее всего, после обновления. Уже сохранённый архив цел, но новые переписки не сохраняются.", source),
+                      todo: tr("Программу нужно поправить под новый формат. Напишите автору или попросите ИИ-помощника в папке проекта: «Бэкап ИИ: формат не понятен, поправь Sources/Exporter.swift»."),
                       actions: [.check, .journal, .author])
     }
     if summary.contains("не извлечён текст") {
-        return Advice(what: "Часть переписок \(source) не удалось прочитать — их формат отличается от привычного. Остальные сохраняются.",
-                      todo: "Если повторяется несколько дней — программу нужно поправить под новый формат. Напишите автору или попросите ИИ-помощника поправить Sources/Exporter.swift.",
+        return Advice(what: trf("Часть переписок %@ не удалось прочитать — их формат отличается от привычного. Остальные сохраняются.", source),
+                      todo: tr("Если повторяется несколько дней — программу нужно поправить под новый формат. Напишите автору или попросите ИИ-помощника поправить Sources/Exporter.swift."),
                       actions: [.check, .journal, .author])
     }
     if summary.contains("zstd") {
-        return Advice(what: "Старые сжатые сессии Codex пропущены: на Mac нет утилиты zstd.",
-                      todo: "Установите её в Терминале командой «brew install zstd» и нажмите «Сохранить снова». Новые сессии сохраняются и без неё.",
+        return Advice(what: tr("Старые сжатые сессии Codex пропущены: на Mac нет утилиты zstd."),
+                      todo: tr("Установите её в Терминале командой «brew install zstd» и нажмите «Сохранить снова». Новые сессии сохраняются и без неё."),
                       actions: [.save, .journal])
     }
     if summary.contains("нечитаемых строк") {
-        return Advice(what: "В файле переписки есть недописанные строки — обычно это сессия, которая шла в момент сохранения.",
-                      todo: "Обычно ничего делать не нужно: при следующем сохранении всё прочитается. Если повторяется несколько дней — нажмите «Проверить формат».",
+        return Advice(what: tr("В файле переписки есть недописанные строки — обычно это сессия, которая шла в момент сохранения."),
+                      todo: tr("Обычно ничего делать не нужно: при следующем сохранении всё прочитается. Если повторяется несколько дней — нажмите «Проверить формат»."),
                       actions: [.save, .check])
     }
     if summary.contains("упрощённым способом") {
-        return Advice(what: "\(source) обновился и изменил формат. Переписки всё равно сохранены — запасным способом, текст на месте.",
-                      todo: "Ничего срочного. Чтобы вернуть точный разбор, напишите автору или попросите ИИ-помощника поправить Sources/Readers.swift под новую версию.",
+        return Advice(what: trf("%@ обновился и изменил формат. Переписки всё равно сохранены — запасным способом, текст на месте.", source),
+                      todo: tr("Ничего срочного. Чтобы вернуть точный разбор, напишите автору или попросите ИИ-помощника поправить Sources/Readers.swift под новую версию."),
                       actions: [.check, .journal, .author])
     }
     if summary.contains("не прочитано") || summary.contains("базы Codex") || summary.contains("база Codex") || summary.contains("базы Hermes") || summary.contains("база Hermes") {
-        return Advice(what: "Часть переписок \(source) не удалось прочитать. Они не потеряны — программа пробует снова при каждом сохранении.",
-                      todo: "Нажмите «Проверить формат». Если повторяется несколько дней — напишите автору или попросите ИИ-помощника поправить разбор этого источника.",
+        return Advice(what: trf("Часть переписок %@ не удалось прочитать. Они не потеряны — программа пробует снова при каждом сохранении.", source),
+                      todo: tr("Нажмите «Проверить формат». Если повторяется несколько дней — напишите автору или попросите ИИ-помощника поправить разбор этого источника."),
                       actions: [.check, .journal, .author])
     }
     if summary.contains("папка для копии недоступна") || summary.contains("копию архива") || summary.contains("папки копии") {
-        return Advice(what: "Копия архива не обновилась: папка для копии недоступна.",
-                      todo: "Подключите диск с копией или выберите другую папку в «Копия архива». Основной архив в порядке.",
+        return Advice(what: tr("Копия архива не обновилась: папка для копии недоступна."),
+                      todo: tr("Подключите диск с копией или выберите другую папку в разделе «Копия архива». Основной архив в порядке."),
                       actions: [.save])
     }
     if summary.contains("папка не найдена") {
-        return Advice(what: "Одна из папок с экспортами .md недоступна.",
-                      todo: "Подключите диск или уберите эту папку в разделе «Папки с экспортами .md». Остальное сохраняется.",
+        return Advice(what: tr("Одна из папок с экспортами .md недоступна."),
+                      todo: tr("Подключите диск или уберите эту папку в разделе «Папки с экспортами .md». Остальное сохраняется."),
                       actions: [.save])
     }
     if summary.contains("переписки не найдены") {
-        return Advice(what: "\(source) установлен, но переписок в нём нет.",
-                      todo: "Если вы им не пользуетесь — всё в порядке, ничего делать не нужно.",
+        return Advice(what: trf("%@ установлен, но переписок в нём нет.", source),
+                      todo: tr("Если вы им не пользуетесь — всё в порядке, ничего делать не нужно."),
                       actions: [.save])
     }
-    return Advice(what: summary.isEmpty ? "Последнее сохранение прошло с ошибкой." : summary,
-                  todo: "Нажмите «Проверить формат» и посмотрите журнал. Если непонятно — напишите автору.",
+    return Advice(what: summary.isEmpty ? tr("Последнее сохранение прошло с ошибкой.") : summary,
+                  todo: tr("Нажмите «Проверить формат» и посмотрите журнал. Если непонятно — напишите автору."),
                   actions: [.check, .journal, .author])
 }
 
@@ -762,9 +972,9 @@ struct ProblemCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("\(vm.status.level.mark) Что случилось").font(.bellota(17)).foregroundColor(color)
+            Text("\(vm.status.level.mark) " + tr("Что случилось")).font(.bellota(17)).foregroundColor(color)
             Text(advice.what).font(.bellota(15, bold: false)).fixedSize(horizontal: false, vertical: true)
-            Text("Что делать").font(.bellota(17)).padding(.top, 4)
+            Text(tr("Что делать")).font(.bellota(17)).padding(.top, 4)
             Text(advice.todo).font(.bellota(15, bold: false)).foregroundColor(Palette.dim).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
                 ForEach(advice.actions, id: \.self) { a in
@@ -782,11 +992,12 @@ struct ProblemCard: View {
 
     func title(_ a: FixAction) -> String {
         switch a {
-        case .save: return vm.busy ? "Сохраняю…" : "Сохранить снова"
-        case .folder: return "Изменить папку…"
-        case .journal: return "Журнал"
-        case .author: return "Написать автору"
-        case .check: return "Проверить формат"
+        case .save: return vm.busy ? tr("Сохраняю…") : tr("Сохранить снова")
+        case .folder: return tr("Изменить папку…")
+        case .journal: return tr("Журнал")
+        case .author: return tr("Написать автору")
+        case .check: return tr("Проверить формат")
+        case .path: return tr("Изменить путь…")
         }
     }
 
@@ -797,6 +1008,7 @@ struct ProblemCard: View {
         case .journal: vm.openJournal()
         case .author: vm.writeAuthor(about: advice.what)
         case .check: vm.checkFormat()
+        case .path: vm.demoOnly(tr("Изменить путь…"))
         }
     }
 }
@@ -819,6 +1031,9 @@ struct RootView: View {
                     CompactView(vm: vm)
                 }
             }
+            .id(vm.config.language)   // сменили язык — окно строится заново целиком, все надписи на новом языке
+            // Пока открыто окно поверх (сообщение, автор, установка), то, что под ним, недоступно и для VoiceOver.
+            .accessibilityHidden(vm.message != nil || vm.showAuthor || vm.showWhat || vm.installing > 0)
             TrafficLights(close: { vm.onHide?() }, green: {
                 guard vm.config.setupDone else { return }
                 vm.expanded.toggle()
@@ -827,6 +1042,9 @@ struct RootView: View {
             .padding(.leading, 30)
             .padding(.top, 24)
         }
+        .overlay { if vm.installing > 0 { InstallView(vm: vm) } }
+        .overlay { if vm.showAuthor { AuthorView(vm: vm) } }
+        .overlay { if let m = vm.message { MessageView(vm: vm, msg: m) } }   // сообщение — поверх всего
         .foregroundColor(.white)
         .environment(\.colorScheme, .dark)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -869,8 +1087,12 @@ struct CompactView: View {
                 .padding(.top, advice(for: vm.status) == nil ? 52 : 40)
             Text(vm.status.headline).font(.bellota(28)).padding(.top, 14)
             Text(vm.lastRunText).font(.bellota(15, bold: false)).foregroundColor(Palette.dim).padding(.top, 4)
+            if vm.updateAvailable {
+                LinkButton(title: trf("Доступна версия %@ ›", vm.updateVersion)) { vm.expanded = true; vm.onResize?() }
+                    .font(.bellota(14, bold: false)).padding(.top, 6)
+            }
             if let a = advice(for: vm.status) {
-                Text(a.what + " Что делать — в подробностях.")
+                Text(a.what + tr(" Что делать — в подробностях."))
                     .font(.bellota(14, bold: false)).foregroundColor(Palette.level(vm.status.level))
                     .multilineTextAlignment(.center).lineLimit(3).padding(.horizontal, 30).padding(.top, 8)
             }
@@ -888,19 +1110,19 @@ struct CompactView: View {
             }
             .padding(.top, 16)
             VStack(spacing: 12) {
-                Button(vm.busy ? "Сохраняю…" : "Сохранить сейчас") { vm.saveNow() }
+                Button(vm.busy ? tr("Сохраняю…") : tr("Сохранить сейчас")) { vm.saveNow() }
                     .buttonStyle(GlassButtonStyle(accent: true)).disabled(vm.busy)
                 HStack(spacing: 12) {
-                    Button("Открыть архив") { vm.openArchive() }.buttonStyle(GlassButtonStyle())
-                    Button("Журнал") { vm.openJournal() }.buttonStyle(GlassButtonStyle())
+                    Button(tr("Открыть архив")) { vm.openArchive() }.buttonStyle(GlassButtonStyle())
+                    Button(tr("Журнал")) { vm.openJournal() }.buttonStyle(GlassButtonStyle())
                 }
-                Button("Подробности и настройки ▾") { vm.expanded = true; vm.onResize?() }
+                Button(tr("Подробности и настройки ▾")) { vm.expanded = true; vm.onResize?() }
                     .buttonStyle(GlassButtonStyle(dashed: true))
             }
             .padding(.horizontal, 34)
             .padding(.top, 18)
-            Spacer(minLength: 0)
-            OlegLogo(width: 92) { vm.onAbout?() }.padding(.bottom, 16)
+            // Логотип — посередине между кнопками и низом окна.
+            OlegLogo(width: 92) { vm.onAbout?() }.frame(maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity)
     }
@@ -915,25 +1137,25 @@ struct SetupView: View {
                 .resizable().frame(width: 110, height: 110).clipShape(Circle())
                 .shadow(color: Palette.purple.opacity(0.6), radius: 18)
                 .padding(.top, 48)
-            Text("Бэкап ИИ").font(.bellota(28)).padding(.top, 12)
-            Text("Сохраняет текст переписок Claude Code и Codex в Markdown по датам — на этом Mac.")
+            Text(tr("Бэкап ИИ")).font(.bellota(28)).padding(.top, 12)
+            Text(tr("Сохраняет текст переписок Claude Code и Codex в Markdown по датам — на этом Mac."))
                 .font(.bellota(15, bold: false)).foregroundColor(Palette.dim)
                 .multilineTextAlignment(.center).padding(.horizontal, 34).padding(.top, 6)
             VStack(alignment: .leading, spacing: 6) {
-                Text("Куда сохранять архив").font(.bellota(16))
+                Text(tr("Куда сохранять архив")).font(.bellota(16))
                 Text(Fmt.shortPath(vm.setupPath)).font(.bellota(14, bold: false)).foregroundColor(Palette.dim).lineLimit(2)
-                Button("Изменить…") { vm.chooseFolder(setup: true) }.buttonStyle(GlassButtonStyle(height: 34)).padding(.top, 4)
+                Button(tr("Изменить…")) { vm.chooseFolder(setup: true) }.buttonStyle(GlassButtonStyle(height: 34)).padding(.top, 4)
             }
             .padding(.horizontal, 34).padding(.top, 18)
             if ClaudeRetention.installed && vm.retentionDays < ClaudeRetention.wanted {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("⚠️ Claude Code удаляет переписки старше \(vm.retentionDays) дн.").font(.bellota(15))
-                    Button("Хранить 10 лет") { vm.extendRetention() }.buttonStyle(GlassButtonStyle(height: 34))
+                    Text(trf("⚠️ Claude Code удаляет переписки старше %d дн.", vm.retentionDays)).font(.bellota(15))
+                    Button(tr("Хранить 10 лет")) { vm.extendRetention() }.buttonStyle(GlassButtonStyle(height: 34))
                 }
                 .padding(.horizontal, 34).padding(.top, 14)
             }
             Spacer(minLength: 0)
-            Button("Начать") { vm.finishSetup(); vm.onResize?() }
+            Button(tr("Начать")) { vm.finishSetup(); vm.onResize?() }
                 .buttonStyle(GlassButtonStyle(accent: true)).padding(.horizontal, 34)
             OlegLogo(width: 92) { vm.onAbout?() }.padding(.vertical, 14)
         }
@@ -953,14 +1175,14 @@ struct SourceTile: View {
                 Text(s.name).font(.bellota(15)).lineLimit(1)
             }
             if s.level == .none {
-                Text(s.note.capitalizedFirst).font(.bellota(12, bold: false)).foregroundColor(Palette.dim).lineLimit(2).padding(.top, 6)
+                Text(s.shownNote.capitalizedFirst).font(.bellota(12, bold: false)).foregroundColor(Palette.dim).lineLimit(2).padding(.top, 6)
             } else {
                 Text("\(s.sessions)").font(.bellota(24)).padding(.top, 2)
                 if s.level == .ok {
-                    Text("\(s.newToday) \(plural(s.newToday, "новая", "новых", "новых")) сегодня")
+                    Text(newTodayText(s.newToday))
                         .font(.bellota(12, bold: false)).foregroundColor(Palette.dim).lineLimit(1)
                 } else {
-                    Text("\(s.level.mark) \(s.note.capitalizedFirst)").font(.bellota(12)).foregroundColor(Palette.level(s.level)).lineLimit(1)
+                    MarqueeText(text: "\(s.level.mark) \(s.shownNote.capitalizedFirst)").font(.bellota(12)).foregroundColor(Palette.level(s.level))
                 }
             }
         }
@@ -982,19 +1204,19 @@ struct SourceCard: View {
                 Text(s.name).font(.bellota(19))
             }
             if s.level == .none {
-                Text(s.note.capitalizedFirst).font(.bellota(15, bold: false)).foregroundColor(Palette.dim).padding(.top, 12)
+                Text(s.shownNote.capitalizedFirst).font(.bellota(15, bold: false)).foregroundColor(Palette.dim).padding(.top, 12)
             } else {
                 Text("\(s.sessions)").font(.bellota(compact ? 30 : 36)).padding(.top, compact ? 4 : 8)
-                Text("\(plural(s.sessions, "сессия", "сессии", "сессий")) · \(s.newToday) \(plural(s.newToday, "новая", "новых", "новых")) сегодня")
+                Text("\(plural(s.sessions, "сессия", "сессии", "сессий")) · " + newTodayText(s.newToday))
                     .font(.bellota(15, bold: false)).foregroundColor(Palette.dim).padding(.top, 4)
                 Group {
                     if s.level == .ok {
-                        Text("Формат понятен ✅")
+                        Text(tr("Формат понятен ✅"))
                     } else {
-                        Text("\(s.level.mark) \(s.note.capitalizedFirst)").foregroundColor(Palette.level(s.level))
+                        MarqueeText(text: "\(s.level.mark) \(s.shownNote.capitalizedFirst)").foregroundColor(Palette.level(s.level))
                     }
                 }
-                .font(.bellota(15)).lineLimit(2).padding(.top, 8)
+                .font(.bellota(15)).padding(.top, 8)
             }
         }
         .frame(maxWidth: .infinity, minHeight: compact ? 112 : 128, alignment: .topLeading)
@@ -1010,8 +1232,10 @@ struct SourcesSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("ИСТОЧНИКИ").font(.bellota(14, bold: false)).tracking(1.2).foregroundColor(Palette.dim).padding(.top, 20).padding(.bottom, 4)
-            ForEach(SourceKind.allCases.filter { !$0.isWebExport }) { kind in
+            Text(tr("ИСТОЧНИКИ")).font(.bellota(14, bold: false)).tracking(1.2).foregroundColor(Palette.dim).padding(.top, 20).padding(.bottom, 4)
+            ForEach(SourceKind.allCases.filter { k in
+                !k.isWebExport && (vm.source(k)?.found == true || vm.config.sourcePaths[k.rawValue] != nil || (vm.source(k)?.sessions ?? 0) > 0)
+            }) { kind in
                 let st = vm.source(kind)
                 let on = vm.config.enabled(kind)
                 let found = st?.found == true
@@ -1019,14 +1243,14 @@ struct SourcesSection: View {
                     Dot(color: !on ? Palette.off : (found ? Palette.level(st?.level == .none ? .ok : (st?.level ?? .ok)) : Palette.off), size: 12)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(kind.title + (kind.note.isEmpty ? "" : " · " + kind.note)).font(.bellota(16))
-                        Text((found ? "✅ " : "❌ не найдено · ") + Fmt.shortPath(vm.config.path(kind)) + (found && (st?.sessions ?? 0) > 0 ? " · \(st!.sessions)" : ""))
-                            .font(.bellota(13, bold: false)).foregroundColor(Palette.dim).lineLimit(1).truncationMode(.middle)
+                        MarqueeText(text: (found ? "✅ " : tr("❌ не найдено · ")) + Fmt.shortPath(vm.config.path(kind)) + (found && (st?.sessions ?? 0) > 0 ? " · \(st!.sessions)" : ""))
+                            .font(.bellota(13, bold: false)).foregroundColor(Palette.dim)
                     }
                     Spacer()
                     if vm.config.sourcePaths[kind.rawValue] != nil {
-                        Button("Сбросить") { vm.resetPath(kind) }.buttonStyle(GlassButtonStyle(height: 30)).frame(width: 96)
+                        Button(tr("Сбросить")) { vm.resetPath(kind) }.buttonStyle(GlassButtonStyle(height: 30)).frame(width: 96)
                     }
-                    Button("Изменить путь…") { vm.changePath(kind) }.buttonStyle(GlassButtonStyle(height: 30)).frame(width: 176)
+                    Button(tr("Изменить путь…")) { vm.changePath(kind) }.buttonStyle(GlassButtonStyle(height: 30)).frame(width: 176)
                     Toggle("", isOn: Binding(get: { on }, set: { vm.setSource(kind, on: $0) }))
                         .toggleStyle(.switch).labelsHidden().tint(Palette.purple)
                 }
@@ -1034,17 +1258,25 @@ struct SourcesSection: View {
                 .overlay(Rectangle().fill(Palette.line).frame(height: 1), alignment: .bottom)
             }
 
-            SettingRow(title: "Экспорты claude.ai и ChatGPT",
+            HStack {
+                Text(tr("Если программа стоит в необычном месте")).font(.bellota(14, bold: false)).foregroundColor(Palette.dim)
+                Spacer()
+                Button(tr("Добавить программу…")) { vm.addSourceProgram() }.buttonStyle(GlassButtonStyle(accent: true, height: 30)).frame(width: 224) // ширина = «Изменить путь…» (176) + отступ (10) + переключатель (38)
+            }
+            .padding(.vertical, 9)
+            .overlay(Rectangle().fill(Palette.line).frame(height: 1), alignment: .bottom)
+
+            SettingRow(title: tr("Экспорты claude.ai и ChatGPT"),
                        subtitle: webSubtitle) {
                 HStack(spacing: 8) {
-                    Button("Как скачать?") { vm.exportHelp() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 130)
-                    Button("Импортировать экспорт…") { vm.importExport() }.buttonStyle(GlassButtonStyle(accent: true, height: 32)).frame(width: 236)
-                        .help("Можно просто перетащить скачанный ZIP в окно программы")
+                    Button(tr("Как скачать?")) { vm.exportHelp() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 130)
+                    Button(tr("Импортировать экспорт…")) { vm.importExport() }.buttonStyle(GlassButtonStyle(accent: true, height: 32)).frame(width: 236)
+                        .help(tr("Можно просто перетащить скачанный ZIP в окно программы"))
                 }
             }
             HStack(spacing: 10) {
                 CheckBox(on: Binding(get: { vm.config.exportReminder }, set: { v in vm.update { $0.exportReminder = v } }))
-                Text("Раз в месяц напоминать скачать экспорт с сайтов").font(.bellota(16))
+                Text(tr("Раз в месяц напоминать скачать экспорт с сайтов")).font(.bellota(16))
                 Spacer()
             }
             .padding(.vertical, 11)
@@ -1053,18 +1285,18 @@ struct SourcesSection: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Папки с экспортами .md").font(.bellota(16))
-                        Text("Cursor, Windsurf и другие программы: укажите, куда сохраняете их чаты в .md или .txt").font(.bellota(13, bold: false)).foregroundColor(Palette.dim)
+                        Text(tr("Папки с экспортами .md")).font(.bellota(16))
+                        Text(tr("Cursor, Windsurf и другие программы: укажите, куда сохраняете их чаты в .md или .txt")).font(.bellota(13, bold: false)).foregroundColor(Palette.dim)
                     }
                     Spacer()
-                    Button("+ Добавить папку…") { vm.addMDFolder() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 190)
+                    Button(tr("+ Добавить папку…")) { vm.addMDFolder() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 190)
                 }
                 ForEach(vm.config.mdFolders) { f in
                     HStack(spacing: 10) {
                         Dot(color: dirExists(f.path) ? Palette.ok : Palette.warn, size: 10)
                         Text("\(f.name) · \(Fmt.shortPath(f.path))").font(.bellota(14, bold: false)).foregroundColor(Palette.dim).lineLimit(1).truncationMode(.middle)
                         Spacer()
-                        Button("Убрать") { vm.removeMDFolder(f) }.buttonStyle(GlassButtonStyle(height: 28)).frame(width: 90)
+                        Button(tr("Убрать")) { vm.removeMDFolder(f) }.buttonStyle(GlassButtonStyle(height: 28)).frame(width: 90)
                     }
                 }
             }
@@ -1076,7 +1308,7 @@ struct SourcesSection: View {
     var webSubtitle: String {
         let parts = [SourceKind.claudeai, .chatgpt].map { k -> String in
             let n = vm.source(k)?.sessions ?? 0
-            return n > 0 ? "\(k.title): \(n)" : "\(k.title): не импортирован"
+            return n > 0 ? "\(k.title): \(n)" : "\(k.title): " + tr("не импортирован")
         }
         return parts.joined(separator: " · ")
     }
@@ -1086,13 +1318,19 @@ struct SettingRow<Trailing: View>: View {
     var title: String
     var subtitle: String?
     var note: AnyView? = nil     // третья строка под подписью (подсказка или ссылка)
+    var badge = false            // метка NEW у новой строки
+    var subtitleColor: Color = Palette.dim
+    var oneLine = false          // путь: одна строка, не влезло — бегущая строка при наведении
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.bellota(16))
-                if let subtitle { Text(subtitle).font(.bellota(13, bold: false)).foregroundColor(Palette.dim) }
+                HStack(spacing: 6) { Text(title).font(.bellota(16)); if badge { NewBadge() } }
+                if let subtitle {
+                    if oneLine { MarqueeText(text: subtitle).font(.bellota(13, bold: false)).foregroundColor(subtitleColor) }
+                    else { Text(subtitle).font(.bellota(13, bold: false)).foregroundColor(subtitleColor) }
+                }
                 if let note { note }
             }
             Spacer()
@@ -1115,7 +1353,7 @@ struct OpenWithButton: View {
             Button { vm.openArchive() } label: {
                 HStack(spacing: 8) {
                     Image(nsImage: current.icon).resizable().frame(width: 16, height: 16)
-                    Text("Открыть в \(current.short)").truncationMode(.tail)
+                    Text(trf("Открыть в %@", current.short)).truncationMode(.tail)
                 }
                 .padding(.horizontal, 16)
             }
@@ -1130,7 +1368,7 @@ struct OpenWithButton: View {
                 }
                 .pickerStyle(.inline).labelsHidden()
                 Divider()
-                Button("Другая программа…") { vm.chooseOpenApp() }
+                Button(tr("Другая программа…")) { vm.chooseOpenApp() }
             } label: {
                 Text("▾").font(.bellota(14)).foregroundColor(.white)
             }
@@ -1138,7 +1376,7 @@ struct OpenWithButton: View {
             .frame(width: 26, height: 32)
             .background(RoundedRectangle(cornerRadius: 9).fill(Palette.button))
             .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Palette.buttonBorder, lineWidth: 1))
-            .help("Выбрать программу для архива")
+            .help(tr("Выбрать программу для архива"))
         }
     }
 }
@@ -1151,16 +1389,28 @@ struct DetailView: View {
             HStack(spacing: 16) {
                 Image(nsImage: resourceImage("mascot")).resizable().frame(width: 58, height: 58).clipShape(Circle())
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Бэкап ИИ").font(.bellota(30))
-                    Text("\(vm.status.level.mark) \(vm.status.headline) · \(vm.lastRunText.lowercased()) · \(vm.nextRunText)")
-                        .font(.bellota(15, bold: false)).foregroundColor(Palette.dim).lineLimit(1)
+                    HStack(spacing: 10) { Text(tr("Бэкап ИИ")).font(.bellota(30)); if Build.demo || Build.check { TestBadge() } }
+                    MarqueeText(text: "\(vm.status.level.mark) \(vm.status.headline) · \(vm.lastRunText.lowercasedFirst) · \(vm.nextRunText)")
+                        .font(.bellota(15, bold: false)).foregroundColor(Palette.dim)
                 }
                 Spacer()
-                Button("Свернуть ▴") { vm.expanded = false; vm.onResize?() }
+                Button(tr("Свернуть ▴")) { vm.expanded = false; vm.onResize?() }
                     .buttonStyle(GlassButtonStyle()).frame(width: 130)
             }
             .padding(.top, 50)
 
+            TabSwitch(tab: $vm.tab).padding(.top, 14)
+
+            if vm.tab == 0 { chatsTab } else { KitView(vm: vm) }
+
+            HStack { Spacer(); OlegLogo(width: 100) { vm.onAbout?() }; Spacer() }.padding(.top, 12).padding(.bottom, 8)
+        }
+        .padding(.horizontal, 34)
+        .overlay { if vm.showWhat { WhatSheet(vm: vm) } }
+    }
+
+    private var chatsTab: some View {
+        VStack(alignment: .leading, spacing: 0) {
             // До трёх программ — большие карточки, как было. Больше — плитки по 4: два ряда помещаются целиком,
             // с третьего — прокрутка в блоке той же высоты, чтобы сохранения и настройки не уезжали вниз.
             Group {
@@ -1185,7 +1435,7 @@ struct DetailView: View {
             if let a = advice(for: vm.status) {
                 ProblemCard(vm: vm, advice: a).padding(.top, 16)
             } else {
-            Text("ПОСЛЕДНИЕ СОХРАНЕНИЯ").font(.bellota(14, bold: false)).tracking(1.2).foregroundColor(Palette.dim)
+            Text(tr("ПОСЛЕДНИЕ СОХРАНЕНИЯ")).font(.bellota(14, bold: false)).tracking(1.2).foregroundColor(Palette.dim)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .overlay(alignment: .topLeading) {
                     Image(nsImage: resourceImage("car")).resizable().aspectRatio(contentMode: .fit).frame(width: 170, height: 74)
@@ -1194,54 +1444,42 @@ struct DetailView: View {
                 }
                 .padding(.top, 20).zIndex(1)
 
-            VStack(spacing: 0) {
+            Group {
                 if vm.status.history.isEmpty {
-                    Text("Сохранений ещё не было").font(.bellota(15, bold: false)).foregroundColor(Palette.dim)
+                    Text(tr("Сохранений ещё не было")).font(.bellota(15, bold: false)).foregroundColor(Palette.dim)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
-                }
-                ForEach(Array(vm.status.history.prefix(4).enumerated()), id: \.offset) { _, r in
-                    HStack(spacing: 0) {
-                        Text(Fmt.dayTime.string(from: r.date)).foregroundColor(Palette.dim).frame(width: 110, alignment: .leading)
-                        Text(r.trigger.title).foregroundColor(Palette.dim).frame(width: 190, alignment: .leading)
-                        Text("\(r.level.mark) \(r.summary)").lineLimit(1).truncationMode(.tail)
-                        Spacer(minLength: 0)
+                } else {
+                    HistoryList(count: vm.status.history.count) {
+                        ForEach(Array(vm.status.history.enumerated()), id: \.offset) { i, r in
+                            HistoryRow(date: r.date, who: r.trigger.title, text: "\(r.level.mark) \(r.shown)", level: r.level,
+                                       advice: r.level == .ok ? nil : advice(for: AppStatus(level: r.level, history: [r])),
+                                       onFix: { vm.runFix($0, about: r.summary) }, rowID: i, openTitleTrailing: 170)
+                        }
                     }
-                    .font(.bellota(15, bold: false))
-                    .padding(.vertical, 7)
-                    .overlay(Rectangle().fill(Palette.line).frame(height: 1), alignment: .bottom)
                 }
             }
             .padding(.top, 8)
             }
 
-            Text("НАСТРОЙКИ").font(.bellota(14, bold: false)).tracking(1.2).foregroundColor(Palette.dim).padding(.top, 20)
+            Text(tr("НАСТРОЙКИ")).font(.bellota(14, bold: false)).tracking(1.2).foregroundColor(Palette.dim).padding(.top, 20)
 
             // Настройки прокручиваются, если окно не вмещает всё (например, когда показана проблема).
             ThemedScroll {
             VStack(alignment: .leading, spacing: 0) {
-            SettingRow(title: "Автосохранение каждый день",
-                       subtitle: "Если Mac спал или был выключен — сохранит после пробуждения или входа") {
-                HStack(spacing: 14) {
+            SettingRow(title: tr("Автосохранение каждый день"),
+                       subtitle: tr("Если Mac спал или был выключен — сохранит после пробуждения или входа")) {
+                HStack(spacing: 10) {
                     Image(nsImage: resourceImage("sloth")).resizable().aspectRatio(contentMode: .fit).frame(height: 54)
-                    HStack(spacing: 2) {
-                        Picker("", selection: Binding(get: { vm.config.hour }, set: { v in vm.update { $0.hour = v } })) {
-                            ForEach(0..<24, id: \.self) { Text(String(format: "%02d", $0)).tag($0) }
-                        }
-                        .labelsHidden().frame(width: 62)
-                        Text(":").font(.bellota(16))
-                        Picker("", selection: Binding(get: { vm.config.minute }, set: { v in vm.update { $0.minute = v } })) {
-                            ForEach(0..<60, id: \.self) { Text(String(format: "%02d", $0)).tag($0) }
-                        }
-                        .labelsHidden().frame(width: 62)
-                    }
-                    .disabled(!vm.config.autoEnabled)
+                    TimeField(hour: Binding(get: { vm.config.hour }, set: { v in vm.update { $0.hour = v } }),
+                              minute: Binding(get: { vm.config.minute }, set: { v in vm.update { $0.minute = v } }))
+                        .disabled(!vm.config.autoEnabled)
                     Toggle("", isOn: Binding(get: { vm.config.autoEnabled }, set: { v in vm.update { $0.autoEnabled = v } }))
                         .toggleStyle(.switch).labelsHidden().tint(Palette.purple)
                 }
             }
             HStack(spacing: 10) {
                 CheckBox(on: Binding(get: { vm.loginEnabled }, set: { vm.setLogin($0) }))
-                Text("Запускать приложение при входе в macOS").font(.bellota(16))
+                Text(tr("Запускать приложение при входе в macOS")).font(.bellota(16))
                 Image(nsImage: resourceImage("apple")).resizable().frame(width: 26, height: 26)
                 Spacer()
             }
@@ -1249,40 +1487,50 @@ struct DetailView: View {
             .overlay(Rectangle().fill(Palette.line).frame(height: 1), alignment: .bottom)
             HStack(spacing: 10) {
                 CheckBox(on: Binding(get: { vm.config.notify }, set: { v in vm.update { $0.notify = v } }))
-                Text("Уведомлять, если что-то не так").font(.bellota(16))
+                Text(tr("Уведомлять, если что-то не так")).font(.bellota(16))
                 Spacer()
             }
             .padding(.vertical, 11)
             .overlay(Rectangle().fill(Palette.line).frame(height: 1), alignment: .bottom)
+            SettingRow(title: tr("Язык интерфейса"), subtitle: tr("Окно, строка меню и уведомления"),
+                       note: Lang.menuNeedsRestart ? AnyView(HStack(spacing: 6) {
+                           Text(tr("Пункты меню macOS сменят язык после перезапуска")).foregroundColor(Palette.dim)
+                           LinkButton(title: tr("Перезапустить")) { vm.relaunch() }
+                       }.font(.bellota(13, bold: false))) : nil,
+                       badge: true) {
+                LanguagePicker(vm: vm)
+            }
+            UpdatesRow(vm: vm)
             if ClaudeRetention.installed {
-                SettingRow(title: "Claude Code хранит переписки: \(vm.retentionDays) \(plural(vm.retentionDays, "день", "дня", "дней"))",
-                           subtitle: "По умолчанию 30 дней, потом удаляет их сам") {
-                    if vm.retentionDays >= ClaudeRetention.wanted {
-                        Text("✅").font(.system(size: 18))
-                    } else {
-                        Button("Хранить 10 лет") { vm.extendRetention() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 160)
-                    }
+                SettingRow(title: tr("Claude Code хранит переписки"),
+                           subtitle: tr("По умолчанию 30 дней, потом удаляет их сам. Выбор можно поменять в любой момент")) {
+                    PopMenuButton(label: retentionLabel(vm.retentionDays), width: 150, items: [
+                        (tr("30 дней"), vm.retentionDays == 30, { vm.setRetention(30) }),
+                        (tr("1 год"), vm.retentionDays == 365, { vm.setRetention(365) }),
+                        (tr("10 лет"), vm.retentionDays == 3650, { vm.setRetention(3650) })
+                    ])
                 }
             }
-            SettingRow(title: "Ваше имя в архиве", subtitle: "Так подписаны ваши сообщения в файлах") {
+            SettingRow(title: tr("Ваше имя в архиве"), subtitle: tr("Так подписаны ваши сообщения в файлах")) {
                 TextField("", text: Binding(get: { vm.config.userName }, set: { v in vm.update { $0.userName = v } }))
                     .textFieldStyle(.roundedBorder).font(.bellota(15)).frame(width: 200)
             }
             let obsidian = vm.obsidianState
-            SettingRow(title: "Папка архива", subtitle: Fmt.shortPath(vm.config.archiveURL.path).replacingOccurrences(of: "/", with: " › "),
-                       note: AnyView(obsidianNote(obsidian))) {
+            SettingRow(title: tr("Папка архива"), subtitle: Fmt.shortPath(vm.config.archiveURL.path).replacingOccurrences(of: "/", with: " › "),
+                       note: AnyView(obsidianNote(obsidian)), oneLine: true) {
                 HStack(spacing: 8) {
                     OpenWithButton(vm: vm)
-                    Button("Изменить…") { vm.chooseFolder(setup: false) }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 130)
+                    Button(tr("Изменить…")) { vm.chooseFolder(setup: false) }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 130)
                 }
             }
-            SettingRow(title: "Копия архива",
-                       subtitle: vm.config.mirrorPath.map { Fmt.shortPath($0).replacingOccurrences(of: "/", with: " › ") } ?? "Не задана — например, внешний диск или папка облака") {
+            SettingRow(title: tr("Копия архива"),
+                       subtitle: vm.config.mirrorPath.map { Fmt.shortPath($0).replacingOccurrences(of: "/", with: " › ") } ?? tr("Не задана — например, внешний диск или папка облака"),
+                       oneLine: vm.config.mirrorPath != nil) {
                 HStack(spacing: 8) {
                     if vm.config.mirrorPath != nil {
-                        Button("Убрать") { vm.clearMirror() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 90)
+                        Button(tr("Убрать")) { vm.clearMirror() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 90)
                     }
-                    Button("Выбрать…") { vm.chooseMirror() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 130)
+                    Button(tr("Выбрать…")) { vm.chooseMirror() }.buttonStyle(GlassButtonStyle(height: 32)).frame(width: 130)
                 }
             }
 
@@ -1293,37 +1541,36 @@ struct DetailView: View {
             .frame(maxHeight: .infinity)
 
             HStack(spacing: 12) {
-                Button(vm.busy ? "Подождите…" : "Сохранить сейчас") { vm.saveNow() }.buttonStyle(GlassButtonStyle(accent: true))
-                Button("Проверить формат") { vm.checkFormat() }.buttonStyle(GlassButtonStyle())
-                Button("Открыть архив") { vm.openArchive() }.buttonStyle(GlassButtonStyle())
-                Button("Журнал") { vm.openJournal() }.buttonStyle(GlassButtonStyle())
+                Button(vm.busy ? tr("Подождите…") : tr("Сохранить сейчас")) { vm.saveNow() }.buttonStyle(GlassButtonStyle(accent: true))
+                Button(tr("Проверить формат")) { vm.checkFormat() }.buttonStyle(GlassButtonStyle())
+                Button(tr("Открыть архив")) { vm.openArchive() }.buttonStyle(GlassButtonStyle())
+                Button(tr("Журнал")) { vm.openJournal() }.buttonStyle(GlassButtonStyle())
             }
             .disabled(vm.busy)
             .padding(.top, 14)
-
-            HStack { Spacer(); OlegLogo(width: 100) { vm.onAbout?() }; Spacer() }.padding(.top, 8).padding(.bottom, 12)
         }
-        .padding(.horizontal, 34)
     }
 
     @ViewBuilder private func obsidianNote(_ state: ViewModel.ObsidianState) -> some View {
         let link = Color(red: 0.81, green: 0.78, blue: 1)
         switch state {
         case .vault(let vault):
-            Text("Хранилище Obsidian «\((vault as NSString).lastPathComponent)»")
+            Text(trf("Хранилище Obsidian «%@»", (vault as NSString).lastPathComponent))
                 .font(.bellota(13, bold: false)).foregroundColor(link)
         case .notVault:
-            HStack(spacing: 4) {
-                Text("Чтобы читать в Obsidian, откройте эту папку как хранилище.").foregroundColor(Palette.dim)
-                Button("Открыть Obsidian ↗") { vm.chooseObsidianVault() }.buttonStyle(.plain).foregroundColor(link)
+            HStack(spacing: 6) {
+                Text(tr("Не в хранилище Obsidian")).foregroundColor(Palette.dim)
+                Text("·").foregroundColor(Palette.dim)
+                LinkButton(title: tr("открыть в Obsidian как хранилище")) { vm.chooseObsidianVault() }
             }
-            .font(.bellota(13, bold: false))
+            .font(.bellota(13, bold: false)).lineLimit(1)
         case .notInstalled:
-            HStack(spacing: 4) {
-                Text("Удобно читать в Obsidian, он бесплатный.").foregroundColor(Palette.dim)
-                Button("Скачать ↗") { vm.downloadObsidian() }.buttonStyle(.plain).foregroundColor(link)
+            HStack(spacing: 6) {
+                Text(tr("Удобно читать в Obsidian, он бесплатный")).foregroundColor(Palette.dim)
+                Text("·").foregroundColor(Palette.dim)
+                LinkButton(title: tr("скачать")) { vm.downloadObsidian() }
             }
-            .font(.bellota(13, bold: false))
+            .font(.bellota(13, bold: false)).lineLimit(1)
         }
     }
 }
@@ -1360,18 +1607,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Notifier.requestPermission()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { ExportReminder.checkAndNotify() }
+        // Тестовая сборка: без уведомлений и напоминаний.
         registerFonts()
         buildMainMenu()
         buildStatusItem()
         vm.onResize = { [weak self] in self?.resize(animated: true) }
         vm.onAbout = { [weak self] in self?.showAuthor() }
         vm.onHide = { [weak self] in self?.hideToMenuBar() }
+        vm.onShow = { [weak self] in self?.showWindow() }
+        vm.onLanguage = { [weak self] in self?.buildMainMenu(); self?.window?.title = tr("Бэкап ИИ") }
+        Updater.shared.start(vm)
 
         window = MainWindow(contentRect: NSRect(origin: .zero, size: Self.compact),
                             styleMask: [.borderless, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Бэкап ИИ"
+        window.title = tr("Бэкап ИИ")
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
@@ -1384,10 +1633,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         host.sizingOptions = []   // размер окна задаёт программа, а не содержимое
         window.contentView = host
         window.center()
+        vm.onBeforeRelaunch = { [weak self] in
+            guard let w = self?.window else { return }
+            UserDefaults.standard.set(NSStringFromRect(w.frame), forKey: "relaunchFrame")
+        }
+        // Перезапуск после смены языка: открыться там же, где было окно, — те же «Подробности» и вкладка.
+        let args = CommandLine.arguments
+        if args.contains("--reopen") || args.contains("--reopen-details") {
+            if args.contains("--reopen-details") {
+                vm.expanded = true
+                if let i = args.firstIndex(of: "--tab"), i + 1 < args.count { vm.tab = Int(args[i + 1]) ?? 0 }
+                resize(animated: false)
+            }
+            if let saved = UserDefaults.standard.string(forKey: "relaunchFrame") {
+                let f = NSRectFromString(saved)
+                window.setFrameTopLeftPoint(NSPoint(x: f.minX, y: f.maxY))
+                UserDefaults.standard.removeObject(forKey: "relaunchFrame")
+            }
+        }
         showWindow()
 
         // Расписание приводим в порядок при каждом запуске — так переносы программы не ломают его.
         vm.restoreLogin()
+        if !Build.demo { vm.update { _ = $0.pinKitFolder() } }
+        vm.loadKit()
+        // Сменили язык — служебные слова в уже сохранённом переписываются на новый (в фоне; прерванное доделается).
+        if !Build.demo {
+            let c = vm.config
+            DispatchQueue.global(qos: .utility).async {
+                guard let lang = ArchiveLang.ensure(c) else { return }
+                DispatchQueue.main.async { self.vm.update { $0.archiveLang = lang } }
+            }
+        }
         let config = vm.config
         DispatchQueue.global().async { Scheduler.apply(config) }
     }
@@ -1438,20 +1715,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let main = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Об авторе", action: #selector(showAuthor), keyEquivalent: "").target = self
+        appMenu.addItem(withTitle: tr("Об авторе"), action: #selector(showAuthor), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
-        appMenu.addItem(withTitle: "Скрыть окно", action: #selector(hideFromMenu), keyEquivalent: "w").target = self
-        appMenu.addItem(withTitle: "Выйти из «Бэкап ИИ»", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: tr("Скрыть окно"), action: #selector(hideFromMenu), keyEquivalent: "w").target = self
+        appMenu.addItem(withTitle: tr("Выйти из «Бэкап ИИ»"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         main.addItem(appItem)
 
+        if Build.demo {
+            // Меню «Тест»: переключение вымышленных данных, чтобы посмотреть все варианты окна.
+            let testItem = NSMenuItem()
+            let test = NSMenu(title: tr("Тест"))
+            func sub(_ title: String, _ items: [(String, Int)], _ action: Selector) {
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                let m = NSMenu(title: title)
+                for (t, tag) in items {
+                    let i = NSMenuItem(title: t, action: action, keyEquivalent: "")
+                    i.tag = tag; i.target = self
+                    m.addItem(i)
+                }
+                item.submenu = m
+                test.addItem(item)
+            }
+            sub(tr("Состояние «Переписок»"), [(tr("Всё в порядке"), 0), (tr("Есть предупреждение"), 1), (tr("Ошибка"), 2)], #selector(demoScenario(_:)))
+            sub(tr("Программ в «Переписках»"), [(tr("3 — большие карточки"), 3), (tr("6 — плитки"), 6), (tr("12 — плитки с прокруткой"), 12)], #selector(demoSources(_:)))
+            sub(tr("Агентов в «Навыках»"), [(tr("3 — большие карточки"), 3), (tr("5 — как на этом Mac"), 5), (tr("12 — все состояния, с прокруткой"), 12)], #selector(demoAgents(_:)))
+            sub(tr("Записей в истории"), [(tr("Пусто"), 0), ("4", 4), ("60", 60)], #selector(demoHistory(_:)))
+            test.addItem(.separator())
+            test.addItem(withTitle: tr("Окно: «здесь нет переписок»"), action: #selector(demoNoChats), keyEquivalent: "").target = self
+            test.addItem(withTitle: tr("Окно: «Как назвать папку»"), action: #selector(demoFolderName), keyEquivalent: "").target = self
+            test.addItem(.separator())
+            test.addItem(withTitle: tr("Сбросить тестовые данные"), action: #selector(demoReset), keyEquivalent: "").target = self
+            testItem.submenu = test
+            main.addItem(testItem)
+        }
+
         let editItem = NSMenuItem()
-        let edit = NSMenu(title: "Правка")
-        edit.addItem(withTitle: "Отменить", action: Selector(("undo:")), keyEquivalent: "z")
-        edit.addItem(withTitle: "Вырезать", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Скопировать", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Вставить", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Выделить всё", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let edit = NSMenu(title: tr("Правка"))
+        edit.addItem(withTitle: tr("Отменить"), action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: tr("Вырезать"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: tr("Скопировать"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: tr("Вставить"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: tr("Выделить всё"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
         main.addItem(editItem)
         NSApp.mainMenu = main
@@ -1462,7 +1767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let image = resourceImage("menubar")
         image.size = NSSize(width: 18, height: 18)
         statusItem.button?.image = image
-        statusItem.button?.toolTip = "Бэкап ИИ"
+        statusItem.button?.toolTip = tr("Бэкап ИИ")
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -1475,15 +1780,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         head.isEnabled = false
         menu.addItem(head)
         menu.addItem(.separator())
-        add(menu, vm.busy ? "Сохраняю…" : "Сохранить сейчас", #selector(saveFromMenu))
-        add(menu, "Открыть окно", #selector(openCompact))
-        add(menu, "Подробности и настройки…", #selector(openDetail))
-        add(menu, "Открыть архив", #selector(openArchive))
-        add(menu, "Журнал", #selector(openJournal))
+        add(menu, vm.busy ? tr("Сохраняю…") : tr("Сохранить сейчас"), #selector(saveFromMenu))
+        if vm.updateAvailable { add(menu, trf("Доступна версия %@ — установить…", vm.updateVersion), #selector(installFromMenu)) }
+        add(menu, tr("Открыть окно"), #selector(openCompact))
+        add(menu, tr("Подробности и настройки…"), #selector(openDetail))
+        add(menu, tr("Открыть архив"), #selector(openArchive))
+        add(menu, tr("Журнал"), #selector(openJournal))
         menu.addItem(.separator())
-        let auto = add(menu, "Автосохранение: \(vm.config.autoEnabled ? "вкл" : "выкл")", #selector(toggleAuto))
+        let auto = add(menu, trf("Автосохранение: %@", vm.config.autoEnabled ? tr("вкл") : tr("выкл")), #selector(toggleAuto))
         auto.state = vm.config.autoEnabled ? .on : .off
-        add(menu, "Выйти", #selector(NSApplication.terminate(_:)), target: NSApp)
+        add(menu, tr("Выйти"), #selector(NSApplication.terminate(_:)), target: NSApp)
     }
 
     @discardableResult
@@ -1494,7 +1800,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return item
     }
 
+    @objc private func demoScenario(_ sender: NSMenuItem) { Demo.scenario = sender.tag; demoApply() }
+    @objc private func demoSources(_ sender: NSMenuItem) { Demo.sourceCount = sender.tag; demoApply() }
+    @objc private func demoAgents(_ sender: NSMenuItem) { Demo.agentCount = sender.tag; vm.agents = Demo.agents(sender.tag) }
+    @objc private func demoHistory(_ sender: NSMenuItem) {
+        Demo.historyCount = sender.tag
+        vm.kitHistory = Demo.kitHistory(sender.tag)
+        demoApply()
+    }
+    @objc private func demoNoChats() {
+        showWindow()
+        vm.askNoChats(.codex, NSHomeDirectory() + "/Documents/Пример") {}
+    }
+
+    @objc private func demoFolderName() {
+        showWindow()
+        vm.askFolderName("Cursor exports") { _ in }
+    }
+
+    @objc private func demoReset() {
+        Demo.reset()
+        vm.config = AppConfig.load()
+        vm.agents = Demo.agents(Demo.agentCount)
+        vm.kitHistory = Demo.kitHistory(Demo.historyCount)
+        demoApply()
+    }
+    private func demoApply() {
+        Demo.writeStatus()
+        vm.status = AppStatus.load()
+        resize(animated: false)
+    }
+
     @objc private func saveFromMenu() { vm.saveNow() }
+    @objc private func installFromMenu() { showWindow(); vm.installUpdate() }
     @objc private func openArchive() { vm.openArchive() }
     @objc private func openJournal() { vm.openJournal() }
     @objc private func hideFromMenu() { hideToMenuBar() }
@@ -1510,43 +1848,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         showWindow()
     }
 
-    // Окно автора — как в «Программе скачивания» и «Windscribe через Tor 2».
+    // Окно автора — в стиле программы (AuthorView в Kit.swift).
     @objc private func showAuthor() {
-        let alert = NSAlert()
-        alert.icon = resourceImage("mascot")
-        alert.messageText = "✕ Разработчик, автор программы ✕"
-        alert.informativeText = "ツ  🎱"
-        alert.addButton(withTitle: "Написать")
-
-        let emailContainer = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 28))
-        let email = NSTextField(labelWithString: "")
-        email.translatesAutoresizingMaskIntoConstraints = false
-        email.alignment = .center
-        email.isEditable = false
-        email.allowsEditingTextAttributes = true
-        email.isSelectable = true
-        email.drawsBackground = false
-        email.isBezeled = false
-        email.focusRingType = .none
-        email.attributedStringValue = NSAttributedString(
-            string: "samo.zlo.spb@gmail.com",
-            attributes: [.link: URL(string: "mailto:samo.zlo.spb@gmail.com")!,
-                         .foregroundColor: NSColor.linkColor,
-                         .underlineStyle: NSUnderlineStyle.single.rawValue,
-                         .font: NSFont.systemFont(ofSize: 14)]
-        )
-        emailContainer.addSubview(email)
-        NSLayoutConstraint.activate([
-            email.centerXAnchor.constraint(equalTo: emailContainer.centerXAnchor, constant: 26),
-            email.centerYAnchor.constraint(equalTo: emailContainer.centerYAnchor),
-            email.widthAnchor.constraint(equalToConstant: 220),
-            email.heightAnchor.constraint(equalToConstant: 28)
-        ])
-        alert.accessoryView = emailContainer
-        alert.addButton(withTitle: "Закрыть")
-        if alert.runModal() == .alertFirstButtonReturn,
-           let url = URL(string: "mailto:samo.zlo.spb@gmail.com") {
-            NSWorkspace.shared.open(url)
-        }
+        showWindow()
+        vm.showAuthor = true
     }
 }

@@ -1,11 +1,29 @@
 import Foundation
 
+// Вариант сборки (build.sh): DEMO=1 — вымышленные данные; идентификатор «.test» — проверка на настоящих данных;
+// обычная — настоящая программа.
+enum Build {
+    #if DEMO
+    static let demo = true
+    #else
+    static let demo = false
+    #endif
+    // Проверочная сборка: свои настройки в отдельной папке, расписание, автозапуск и уведомления не трогаются,
+    // настоящие переписки и навыки только читаются.
+    static let check = (Bundle.main.bundleIdentifier ?? "").hasSuffix(".test")
+}
+
 // Где программа хранит свои настройки, состояние и статус.
 enum Paths {
     static let home = FileManager.default.homeDirectoryForCurrentUser
+    private static let env = ProcessInfo.processInfo.environment
     // BACKUP_AI_SUPPORT — только для проверки, чтобы не трогать настоящие настройки.
-    static let support = ProcessInfo.processInfo.environment["BACKUP_AI_SUPPORT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
-        ?? home.appendingPathComponent("Library/Application Support/Бэкап ИИ", isDirectory: true)
+    static let support: URL = {
+        if Build.demo { return home.appendingPathComponent("Documents/Мои программы/Бэкап ИИ тест/demo-data", isDirectory: true) }
+        if let s = env["BACKUP_AI_SUPPORT"] { return URL(fileURLWithPath: s, isDirectory: true) }
+        return home.appendingPathComponent(Build.check ? "Library/Application Support/Бэкап ИИ (тест)" : "Library/Application Support/Бэкап ИИ",
+                                           isDirectory: true)
+    }()
     static let config = support.appendingPathComponent("config.json")
     static let state = support.appendingPathComponent("state.json")
     static let status = support.appendingPathComponent("status.json")
@@ -13,14 +31,18 @@ enum Paths {
     static let launchLog = support.appendingPathComponent("launchd.log")
     static let imports = support.appendingPathComponent("imports", isDirectory: true)
 
-    static let isTest = ProcessInfo.processInfo.environment["BACKUP_AI_SUPPORT"] != nil
+    // Проверка и демо: расписание, автозапуск и уведомления не трогаются.
+    static let isTest = Build.demo || Build.check || env["BACKUP_AI_SUPPORT"] != nil
 
     // BACKUP_AI_CLAUDE_DIR / BACKUP_AI_CODEX_DIR — подмена источников для проверки поломки формата.
-    static let claudeProjects = ProcessInfo.processInfo.environment["BACKUP_AI_CLAUDE_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
-        ?? home.appendingPathComponent(".claude/projects", isDirectory: true)
-    static let claudeSettings = home.appendingPathComponent(".claude/settings.json")
-    static let codexRoot = ProcessInfo.processInfo.environment["BACKUP_AI_CODEX_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
-        ?? home.appendingPathComponent(".codex", isDirectory: true)
+    // В демо источники — пустые папки внутри demo-data. В проверке настоящие папки только читаются,
+    // а настройку Claude Code «хранить переписки» программа меняет в своей копии, не в ~/.claude.
+    static let claudeProjects = Build.demo ? support.appendingPathComponent("sources/claude-projects", isDirectory: true)
+        : env["BACKUP_AI_CLAUDE_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? home.appendingPathComponent(".claude/projects", isDirectory: true)
+    static let claudeSettings = isTest ? support.appendingPathComponent("sources/claude-settings.json")
+        : home.appendingPathComponent(".claude/settings.json")
+    static let codexRoot = Build.demo ? support.appendingPathComponent("sources/codex", isDirectory: true)
+        : env["BACKUP_AI_CODEX_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? home.appendingPathComponent(".codex", isDirectory: true)
 
     static func ensureSupport() {
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
@@ -97,9 +119,9 @@ enum SourceKind: String, Codable, CaseIterable, Identifiable {
 
     var note: String {
         switch self {
-        case .vscode: return "Copilot Chat · экспериментально"
-        case .claudeai: return "экспорт с сайта"
-        case .chatgpt: return "экспорт с сайта"
+        case .vscode: return tr("Copilot Chat · экспериментально")
+        case .claudeai: return tr("экспорт с сайта")
+        case .chatgpt: return tr("экспорт с сайта")
         default: return ""
         }
     }
@@ -120,7 +142,7 @@ struct AppConfig: Codable, Equatable {
     var hour = 4
     var minute = 0
     var notify = true
-    var userName = "Я"
+    var userName = tr("Я")
     var loginWanted: Bool?
     var sourcePaths: [String: String] = [:]
     var disabledSources: [String] = []
@@ -129,6 +151,22 @@ struct AppConfig: Codable, Equatable {
     var exportReminder = true
     var openWith: String?            // в чём открывать архив: bundle id программы; nil — Obsidian, если архив в хранилище, иначе Finder
     var customApps: [String] = []    // программы, добавленные вручную («Другая программа…»), — пути к .app
+    // v2: язык и «Навыки и настройки»
+    var language = "sys"
+    var kitEnabled = true
+    var kitWithChats = true
+    var kitHour = 3
+    var kitMinute = 0
+    var kitFolder: String?
+    var kitMirror: String?
+    var kitKeys = "hide"             // hide — скрывать, keep — как есть, skip — не сохранять такие файлы
+    var kitKeepPrev = true
+    var kitOpenWith: String?
+    var kitPaths: [String: String] = [:]   // агент → своя папка (если стоит в необычном месте)
+    var kitOff: [String] = []              // выключенные агенты
+    var kitOwn: [MDFolder] = []            // свои папки (например, AI-Memory) — копируются целиком
+    var archiveLang: String?               // язык служебных слов в уже сохранённых файлах (нет — русский, как в 1.0)
+    var updateMode = "notify"        // auto — проверять и ставить сами, notify — проверять и сообщать, off — не проверять
 
     static func load() -> AppConfig { JSONFile.load(AppConfig.self, from: Paths.config) ?? AppConfig() }
 
@@ -152,6 +190,21 @@ struct AppConfig: Codable, Equatable {
         exportReminder = try c.decodeIfPresent(Bool.self, forKey: .exportReminder) ?? true
         openWith = try c.decodeIfPresent(String.self, forKey: .openWith)
         customApps = try c.decodeIfPresent([String].self, forKey: .customApps) ?? []
+        language = try c.decodeIfPresent(String.self, forKey: .language) ?? d.language
+        kitEnabled = try c.decodeIfPresent(Bool.self, forKey: .kitEnabled) ?? d.kitEnabled
+        kitWithChats = try c.decodeIfPresent(Bool.self, forKey: .kitWithChats) ?? d.kitWithChats
+        kitHour = try c.decodeIfPresent(Int.self, forKey: .kitHour) ?? d.kitHour
+        kitMinute = try c.decodeIfPresent(Int.self, forKey: .kitMinute) ?? d.kitMinute
+        kitFolder = try c.decodeIfPresent(String.self, forKey: .kitFolder)
+        kitMirror = try c.decodeIfPresent(String.self, forKey: .kitMirror)
+        kitKeys = try c.decodeIfPresent(String.self, forKey: .kitKeys) ?? d.kitKeys
+        kitKeepPrev = try c.decodeIfPresent(Bool.self, forKey: .kitKeepPrev) ?? d.kitKeepPrev
+        kitOpenWith = try c.decodeIfPresent(String.self, forKey: .kitOpenWith)
+        kitPaths = try c.decodeIfPresent([String: String].self, forKey: .kitPaths) ?? [:]
+        kitOff = try c.decodeIfPresent([String].self, forKey: .kitOff) ?? []
+        kitOwn = try c.decodeIfPresent([MDFolder].self, forKey: .kitOwn) ?? []
+        archiveLang = try c.decodeIfPresent(String.self, forKey: .archiveLang)
+        updateMode = try c.decodeIfPresent(String.self, forKey: .updateMode) ?? d.updateMode
     }
 
     func path(_ kind: SourceKind) -> String { kind.envOverride ?? sourcePaths[kind.rawValue] ?? kind.defaultPath }
@@ -160,12 +213,30 @@ struct AppConfig: Codable, Equatable {
 
     var archiveURL: URL { URL(fileURLWithPath: archivePath ?? AppConfig.defaultArchivePath(), isDirectory: true) }
 
-    // Если на Mac есть хранилище Obsidian — архив кладём в него, иначе в «Документы».
+    // «Навыки и MCP»: по умолчанию рядом с архивом, если он в хранилище Obsidian, иначе в «Документах».
+    // Название — на языке программы при первой настройке; дальше папка запоминается (kitFolder) и сама не переезжает.
+    var kitURL: URL { URL(fileURLWithPath: kitFolder ?? defaultKitPath(), isDirectory: true) }
+    func defaultKitPath() -> String {
+        let name = tr("Навыки и MCP")
+        if Obsidian.vault(containing: archiveURL) != nil { return archiveURL.deletingLastPathComponent().appendingPathComponent(name).path }
+        if let vault = Obsidian.vaults().first { return (vault as NSString).appendingPathComponent(name) }
+        return Paths.home.appendingPathComponent("Documents").appendingPathComponent(name).path
+    }
+
+    // Если на Mac есть хранилище Obsidian — архив кладём в него, иначе в «Документы». Название — на языке программы.
     static func defaultArchivePath() -> String {
+        let name = tr("История ИИ")
         if let vault = Obsidian.vaults().first {
-            return (vault as NSString).appendingPathComponent("История ИИ")
+            return (vault as NSString).appendingPathComponent(name)
         }
-        return Paths.home.appendingPathComponent("Documents/История ИИ").path
+        return Paths.home.appendingPathComponent("Documents").appendingPathComponent(name).path
+    }
+
+    // Папку навыков, выбранную по умолчанию, запоминаем, чтобы смена языка её не переименовала.
+    mutating func pinKitFolder() -> Bool {
+        guard kitFolder == nil, setupDone else { return false }
+        kitFolder = defaultKitPath()
+        return true
     }
 }
 
@@ -231,10 +302,31 @@ enum Trigger: String, Codable {
 
     var title: String {
         switch self {
-        case .manual: return "вручную"
-        case .schedule: return "по расписанию"
-        case .login: return "при входе / после сна"
+        case .manual: return tr("вручную")
+        case .schedule: return tr("по расписанию")
+        case .login: return tr("при входе / после сна")
         }
+    }
+}
+
+// Сообщение по смыслу: русская фраза-образец (она же ключ перевода) и подставляемые значения.
+// Хранится так, а текст собирается при показе на языке окна — поэтому история переключается вместе с языком.
+struct Msg: Codable, Equatable {
+    var k: String
+    var a: [String] = []
+    init(_ k: String, _ a: [String] = []) { self.k = k; self.a = a }
+    private func fill(_ f: String) -> String { a.isEmpty ? f : String(format: f, arguments: a.map { $0 as CVarArg }) }
+    var ru: String { fill(k) }          // русский текст: по нему подсказки «Что делать» узнают проблему
+    var text: String { fill(tr(k)) }    // на языке окна
+}
+
+extension Array where Element == Msg {
+    // Первые три через «; », остальное — «и ещё N».
+    func joined(ru: Bool) -> String {
+        let head = prefix(3).map { ru ? $0.ru : $0.text }.joined(separator: "; ")
+        guard count > 3 else { return head }
+        let more = Msg(" и ещё %@", ["\(count - 3)"])
+        return head + (ru ? more.ru : more.text)
     }
 }
 
@@ -248,13 +340,31 @@ struct SourceStatus: Codable {
     var newToday = 0
     var formatOK = true
     var note = ""
+    var msgs: [Msg]?                 // то же, что note, по смыслу
+
+    // Пометка на языке окна. Записи прежних версий (без msgs) переводятся как есть.
+    var shownNote: String { msgs.map { $0.joined(ru: false) } ?? tr(note) }
+
+    mutating func set(_ m: [Msg]) { msgs = m; note = m.joined(ru: true) }
+}
+
+// Часть записи истории: «Codex: …» — подпись (программа) и сообщения.
+struct RunPart: Codable {
+    var label: String?
+    var msgs: [Msg]
+    var ru: String { (label.map { $0 + ": " } ?? "") + msgs.joined(ru: true) }
+    var text: String { (label.map { tr($0) + ": " } ?? "") + msgs.joined(ru: false) }
 }
 
 struct RunRecord: Codable {
     var date: Date
     var trigger: Trigger
     var level: Level
-    var summary: String
+    var summary: String              // по-русски: по нему подсказки узнают проблему
+    var parts: [RunPart]?            // то же по смыслу — для показа на языке окна
+
+    // Текст записи на языке окна. Записи прежних версий (без parts) переводятся как раньше.
+    var shown: String { parts.map { $0.map(\.text).joined(separator: " · ") } ?? displaySummary(summary) }
 }
 
 struct AppStatus: Codable {
@@ -269,10 +379,10 @@ struct AppStatus: Codable {
 
     var headline: String {
         switch level {
-        case .ok: return "Всё в порядке"
-        case .warn: return "Есть предупреждения"
-        case .err: return "Ошибка"
-        case .none: return lastRun == nil ? "Ещё не сохранялось" : "Нет данных"
+        case .ok: return tr("Всё в порядке")
+        case .warn: return tr("Есть предупреждения")
+        case .err: return tr("Ошибка")
+        case .none: return lastRun == nil ? tr("Ещё не сохранялось") : tr("Нет данных")
         }
     }
 }

@@ -59,7 +59,7 @@ final class Exporter {
             try? fm.removeItem(at: probe)
         } catch {
             return finish(status: &status, sources: [], level: .err,
-                          summary: "Нет доступа к папке архива: \(Fmt.shortPath(archive.path))")
+                          parts: [RunPart(label: nil, msgs: [Msg("Нет доступа к папке архива: %@", [Fmt.shortPath(archive.path)])])])
         }
         if state.archivePath != archive.path {
             state = ArchiveState(sessions: [:], archivePath: archive.path)
@@ -73,35 +73,38 @@ final class Exporter {
         for folder in config.mdFolders { sources.append(exportMD(folder)) }
         state.save()
         if let problem = mirror() {
-            sources.append(SourceStatus(name: "Копия архива", kind: "mirror", path: config.mirrorPath, found: true,
-                                        level: .warn, formatOK: true, note: problem))
+            var st = SourceStatus(name: "Копия архива", kind: "mirror", path: config.mirrorPath, found: true, level: .warn, formatOK: true)
+            st.set([problem])
+            sources.append(st)
         }
 
         let levels = sources.map(\.level)
         let level: Level = levels.contains(.err) ? .err : (levels.contains(.warn) ? .warn : (levels.contains(.ok) ? .ok : .none))
-        var summary = created == 0 && updated == 0 ? "без изменений" : "\(created) новых, \(updated) обновлено"
-        let notes = sources.filter { $0.level == .warn || $0.level == .err }.map { "\($0.name): \($0.note)" }
-        if !notes.isEmpty { summary += " · " + notes.joined(separator: " · ") }
-        return finish(status: &status, sources: sources, level: level, summary: summary)
+        var parts = [RunPart(label: nil, msgs: [created == 0 && updated == 0 ? Msg("без изменений") : Msg("%@ новых, %@ обновлено", ["\(created)", "\(updated)"])])]
+        for s in sources where s.level == .warn || s.level == .err {
+            parts.append(RunPart(label: s.name, msgs: s.msgs ?? [Msg(s.note)]))
+        }
+        return finish(status: &status, sources: sources, level: level, parts: parts)
     }
 
-    private func finish(status: inout AppStatus, sources: [SourceStatus], level: Level, summary: String) -> RunResult {
+    private func finish(status: inout AppStatus, sources: [SourceStatus], level: Level, parts: [RunPart]) -> RunResult {
         let now = Date()
+        let summary = parts.map(\.ru).joined(separator: " · ")
         status.lastRun = now
         status.lastTrigger = trigger
         status.level = level
         if !sources.isEmpty { status.sources = sources }
-        status.history.insert(RunRecord(date: now, trigger: trigger, level: level, summary: summary), at: 0)
+        status.history.insert(RunRecord(date: now, trigger: trigger, level: level, summary: summary, parts: parts), at: 0)
         if status.history.count > 60 { status.history = Array(status.history.prefix(60)) }
         status.save()
-        appendJournal("\(Fmt.full.string(from: now)) · \(trigger.title) · \(level.mark) \(summary)")
+        appendJournal("\(Fmt.full.string(from: now)) · \(tr(trigger.title)) · \(level.mark) " + parts.map(\.text).joined(separator: " · "))
         return RunResult(status: status, message: summary)
     }
 
     private func appendJournal(_ line: String) {
-        let url = archive.appendingPathComponent("Журнал сохранений.md")
+        let url = archive.appendingPathComponent(AW.journalFile)
         if !fm.fileExists(atPath: url.path) {
-            try? "# Журнал сохранений\n\nЗаписи программы «Бэкап ИИ». Новые — внизу.\n\n".write(to: url, atomically: true, encoding: .utf8)
+            try? "# \(AW.w("Журнал сохранений"))\n\n\(AW.w("Записи программы «Бэкап ИИ». Новые — внизу."))\n\n".write(to: url, atomically: true, encoding: .utf8)
         }
         guard let h = try? FileHandle(forWritingTo: url) else { return }
         h.seekToEndOfFile()
@@ -120,7 +123,7 @@ final class Exporter {
         let scan = Exporter.scan(kind, config)
         var st = SourceStatus(name: kind.title, kind: kind.rawValue, path: config.path(kind), found: scan.found)
         guard scan.found else {
-            st.note = kind.isWebExport ? "экспорт ещё не импортирован" : "не найден на этом Mac"
+            st.set([Msg(kind.isWebExport ? "экспорт ещё не импортирован" : "не найден на этом Mac")])
             return st
         }
         var problems = scan.problems
@@ -133,43 +136,43 @@ final class Exporter {
             if rebuilding { ref.rewrite = true }
             else if unchanged(ref.key, size: ref.size, mod: ref.mod) { readable += 1; continue }
             // Непрочитанное не записывается в состояние — при следующем сохранении программа попробует снова.
-            guard let s = ref.load() else { problems.append("не прочитано: \(ref.label)"); continue }
+            guard let s = ref.load() else { problems.append(Msg("не прочитано: %@", [ref.label])); continue }
             if s.turns.isEmpty {
                 // Пустая сессия (открыли и ничего не написали) — не ошибка.
-                if s.messageLines > 0 { problems.append("не извлечён текст: \(ref.label)") } else { empty += 1 }
+                if s.messageLines > 0 { problems.append(Msg("не извлечён текст: %@", [ref.label])) } else { empty += 1 }
                 continue
             }
             readable += 1
             if s.fallback { fallback += 1; if let v = s.version { versions.insert(v) } }
-            if s.badLines > 0 && !s.fallback { problems.append("\(s.badLines) нечитаемых строк: \(ref.label)") }
+            if s.badLines > 0 && !s.fallback { problems.append(Msg("%@ нечитаемых строк: %@", ["\(s.badLines)", ref.label])) }
             write(s, kind: kind, ref: ref)
         }
         if fallback > 0 {
-            let v = versions.isEmpty ? "" : " (версия \(versions.sorted().joined(separator: ", ")))"
-            problems.append("\(fallback) сохранено упрощённым способом — формат изменился\(v)")
+            problems.append(versions.isEmpty ? Msg("%@ сохранено упрощённым способом — формат изменился", ["\(fallback)"])
+                : Msg("%@ сохранено упрощённым способом — формат изменился (версия %@)", ["\(fallback)", versions.sorted().joined(separator: ", ")]))
         }
         return summarize(&st, prefix: kind.rawValue + ":", files: scan.refs.count - empty, readable: readable, problems: problems)
     }
 
-    private func summarize(_ st: inout SourceStatus, prefix: String, files: Int, readable: Int, problems: [String]) -> SourceStatus {
+    private func summarize(_ st: inout SourceStatus, prefix: String, files: Int, readable: Int, problems: [Msg]) -> SourceStatus {
         let today = "/" + Fmt.day.string(from: Date()) + "/"
         let mine = state.sessions.filter { $0.key.hasPrefix(prefix) }
         st.sessions = mine.count
         st.newToday = mine.values.filter { $0.file.contains(today) }.count
         if files == 0 && problems.isEmpty {
             st.level = .none
-            st.note = "переписок пока нет"
+            st.set([Msg("переписок пока нет")])
         } else if files > 0 && readable == 0 {
             st.level = .err
             st.formatOK = false
-            st.note = "формат не понятен — текст не найден ни в одной сессии"
+            st.set([Msg("формат не понятен — текст не найден ни в одной сессии")])
         } else if !problems.isEmpty {
             st.level = .warn
-            st.formatOK = !problems.contains { $0.hasPrefix("не извлечён") || $0.contains("упрощённым") || $0.contains("формат") }
-            st.note = problems.prefix(3).joined(separator: "; ") + (problems.count > 3 ? " и ещё \(problems.count - 3)" : "")
+            st.formatOK = !problems.contains { $0.k.hasPrefix("не извлечён") || $0.k.contains("упрощённым") || $0.k.contains("формат") }
+            st.set(problems)
         } else {
             st.level = .ok
-            st.note = "формат понятен"
+            st.set([Msg("формат понятен")])
         }
         return st
     }
@@ -229,17 +232,17 @@ final class Exporter {
 
     private func title(_ s: ParsedSession) -> String {
         s.title.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "# ").union(.whitespacesAndNewlines)) }.flatMap { $0.isEmpty ? nil : $0 }
-            ?? s.turns.first(where: { $0.role == .user }).map { String($0.text.prefix(60)) } ?? "Без названия"
+            ?? s.turns.first(where: { $0.role == .user }).map { String($0.text.prefix(60)) } ?? AW.w("Без названия")
     }
 
     private func document(_ s: ParsedSession, kind: SourceKind, title: String, start: Date, day: String, count: Int) -> String {
         var md = """
         ---
-        источник: \(kind.title)
-        дата: \(day)
-        время: \(Fmt.time.string(from: start))
-        проект: "\(Fmt.shortPath(s.cwd))"
-        сессия: \(s.id)
+        \(AW.w("источник")): \(kind.title)
+        \(AW.w("дата")): \(day)
+        \(AW.w("время")): \(Fmt.time.string(from: start))
+        \(AW.w("проект")): "\(Fmt.shortPath(s.cwd))"
+        \(AW.w("сессия")): \(s.id)
         ---
 
         # \(title.replacingOccurrences(of: "\n", with: " "))
@@ -259,7 +262,7 @@ final class Exporter {
         var out = "### \(who)\(when)\n\n\(t.text)\n\n"
         for alt in t.alts {
             let quoted = alt.replacingOccurrences(of: WebScan.userMark, with: config.userName).split(separator: "\n", omittingEmptySubsequences: false).map { "> " + $0 }.joined(separator: "\n")
-            out += "> **↳ другой вариант**\n>\n\(quoted)\n\n"
+            out += "> **\(AW.w("↳ другой вариант"))**\n>\n\(quoted)\n\n"
         }
         return out
     }
@@ -270,17 +273,17 @@ final class Exporter {
         var st = SourceStatus(name: folder.name, kind: "md", path: folder.path, found: dirExists(folder.path))
         guard st.found == true else {
             st.level = .warn
-            st.note = "папка не найдена (диск не подключён?)"
+            st.set([Msg("папка не найдена (диск не подключён?)")])
             return st
         }
         let root = URL(fileURLWithPath: folder.path).resolvingSymlinksInPath()
         let prefix = "md:\(folder.path):"
-        var problems: [String] = []
+        var problems: [Msg] = []
         if let e = fm.enumerator(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
             for case let f as URL in e where ["md", "markdown", "txt"].contains(f.pathExtension.lowercased()) {
                 let rel = relative(f, to: root)
                 let (size, mod) = fileStamp(f)
-                guard size < 20_000_000 else { problems.append("слишком большой файл: \(rel)"); continue }
+                guard size < 20_000_000 else { problems.append(Msg("слишком большой файл: %@", [rel])); continue }
                 let key = prefix + rel
                 if unchanged(key, size: size, mod: mod) { continue }
                 let target = "\(Fmt.fileName(folder.name))/\(rel)"
@@ -293,13 +296,13 @@ final class Exporter {
                     if existed { updated += 1 } else { created += 1 }
                     state.sessions[key] = SessionRecord(file: target, written: 0, sourceSize: size, sourceModified: mod)
                 } catch {
-                    problems.append("не скопирован: \(rel)")
+                    problems.append(Msg("не скопирован: %@", [rel]))
                 }
             }
         }
         st.sessions = state.sessions.keys.filter { $0.hasPrefix(prefix) }.count
         st.level = problems.isEmpty ? (st.sessions > 0 ? .ok : .none) : .warn
-        st.note = problems.isEmpty ? (st.sessions > 0 ? "файлы скопированы" : "в папке пока нет .md") : problems.prefix(3).joined(separator: "; ")
+        st.set(problems.isEmpty ? [Msg(st.sessions > 0 ? "файлы скопированы" : "в папке пока нет .md")] : problems)
         return st
     }
 
@@ -313,13 +316,13 @@ final class Exporter {
 
     // MARK: Копия архива во вторую папку (внешний диск, облако). Только добавляет и обновляет, ничего не удаляет.
 
-    private func mirror() -> String? {
+    private func mirror() -> Msg? {
         guard let path = config.mirrorPath, !path.isEmpty else { return nil }
         let dest = URL(fileURLWithPath: path, isDirectory: true)
         guard dirExists(dest.path) || dirExists(dest.deletingLastPathComponent().path) else {
-            return "папка для копии недоступна: \(Fmt.shortPath(path)) — диск не подключён?"
+            return Msg("папка для копии недоступна: %@ — диск не подключён?", [Fmt.shortPath(path)])
         }
-        do { try fm.createDirectory(at: dest, withIntermediateDirectories: true) } catch { return "нет доступа к папке копии" }
+        do { try fm.createDirectory(at: dest, withIntermediateDirectories: true) } catch { return Msg("нет доступа к папке копии") }
         var failed = 0
         let source = archive.resolvingSymlinksInPath()
         if let e = fm.enumerator(at: source, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
@@ -336,7 +339,7 @@ final class Exporter {
                 } catch { failed += 1 }
             }
         }
-        return failed > 0 ? "\(failed) файлов не скопировано в копию архива" : nil
+        return failed > 0 ? Msg("%@ файлов не скопировано в копию архива", ["\(failed)"]) : nil
     }
 
     // MARK: Проверка формата без записи
@@ -360,7 +363,7 @@ final class Exporter {
             else if ok + simple == 0 { line += " ❌ формат не понятен" }
             else if simple > 0 || failed > 0 { line += " ⚠️" + (simple > 0 ? " упрощённым способом: \(simple)" : "") + (failed > 0 ? " не прочитано: \(failed)" : "") }
             else { line += " ✅" }
-            for p in scan.problems { line += "\n   ⚠️ \(p)" }
+            for p in scan.problems { line += "\n   ⚠️ \(p.text)" }
             lines.append(line)
         }
         lines.append("Распаковщик zstd: " + (Zstd.path() == nil ? "не найден ⚠️" : "есть ✅"))

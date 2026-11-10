@@ -2,15 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDisplayName</key><string>Бэкап ИИ</string>
+    <key>CFBundleDisplayName</key><string>__NAME__</string>
+    <key>LSHasLocalizedDisplayName</key><true/>
     <key>CFBundleExecutable</key><string>BackupAI</string>
     <key>CFBundleIconFile</key><string>AppIcon.icns</string>
-    <key>CFBundleIdentifier</key><string>com.ozzy.backup-ai</string>
+    <key>CFBundleIdentifier</key><string>__BUNDLE_ID__</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>Бэкап ИИ</string>
+    <key>CFBundleName</key><string>__NAME__</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key><string>__BUILD__</string>
+    <key>SUFeedURL</key><string>__FEED__</string>
+    <key>SUPublicEDKey</key><string>K0pU54ZW2t95aJ0U6Ajg+6m/PY9cG/RaEs3EuX9ZWz0=</string>
+    <key>SUEnableAutomaticChecks</key><false/>
+    <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>

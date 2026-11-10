@@ -28,6 +28,7 @@ enum Scheduler {
     // поэтому после переноса программы в другую папку путь в расписании исправится сам.
     static func apply(_ config: AppConfig) {
         guard !Paths.isTest else { return }
+        KitScheduler.apply(config)
         guard config.autoEnabled, config.setupDone else { remove(); return }
         let wanted = desiredPlist(config) as NSDictionary
         if let current = currentPlist(), current == wanted { return }
@@ -65,6 +66,36 @@ enum Scheduler {
     }
 }
 
+// Своё время для навыков и MCP (когда выключено «Вместе с переписками»): вторая задача launchd.
+enum KitScheduler {
+    static let label = "com.ozzy.backup-ai.kit"
+    static var plistURL: URL { Paths.home.appendingPathComponent("Library/LaunchAgents/\(label).plist") }
+
+    static func apply(_ config: AppConfig) {
+        guard !Paths.isTest else { return }
+        guard config.setupDone, config.kitEnabled, !config.kitWithChats else { remove(); return }
+        let wanted: NSDictionary = [
+            "Label": label,
+            "ProgramArguments": [Bundle.main.executablePath ?? "", "--kit", "--auto"],
+            "StartCalendarInterval": ["Hour": config.kitHour, "Minute": config.kitMinute],
+            "ProcessType": "Background",
+            "StandardOutPath": Paths.launchLog.path,
+            "StandardErrorPath": Paths.launchLog.path
+        ]
+        if let current = NSDictionary(contentsOf: plistURL), current == wanted { return }
+        try? FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        Scheduler.launchctl(["bootout", "\(Scheduler.domain)/\(label)"])
+        wanted.write(to: plistURL, atomically: true)
+        Scheduler.launchctl(["bootstrap", Scheduler.domain, plistURL.path])
+    }
+
+    static func remove() {
+        guard FileManager.default.fileExists(atPath: plistURL.path) else { return }
+        Scheduler.launchctl(["bootout", "\(Scheduler.domain)/\(label)"])
+        try? FileManager.default.removeItem(at: plistURL)
+    }
+}
+
 // «Запускать приложение при входе в macOS».
 enum LoginItem {
     static var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
@@ -93,7 +124,10 @@ enum ClaudeRetention {
     }
 
     // Добавляет или меняет одну строку, остальные настройки не трогает. Перед правкой делает копию.
-    static func extend() -> String? {
+    static func extend() -> String? { set(wanted) }
+
+    // Сколько дней Claude Code хранит переписки: 30 (как у него по умолчанию), 365 или 3650.
+    static func set(_ days: Int) -> String? {
         let url = Paths.claudeSettings
         var text = (try? String(contentsOf: url, encoding: .utf8)) ?? "{\n}\n"
         if FileManager.default.fileExists(atPath: url.path) {
@@ -102,11 +136,11 @@ enum ClaudeRetention {
             try? FileManager.default.copyItem(at: url, to: backup)
         }
         if text.contains("\"cleanupPeriodDays\"") {
-            text = Fmt.replace(text, "\"cleanupPeriodDays\"\\s*:\\s*\\d+", "\"cleanupPeriodDays\": \(wanted)")
+            text = Fmt.replace(text, "\"cleanupPeriodDays\"\\s*:\\s*\\d+", "\"cleanupPeriodDays\": \(days)")
         } else if let brace = text.firstIndex(of: "{") {
             let rest = text[text.index(after: brace)...].trimmingCharacters(in: .whitespacesAndNewlines)
             let comma = rest.hasPrefix("}") ? "" : ","
-            text.insert(contentsOf: "\n  \"cleanupPeriodDays\": \(wanted)\(comma)", at: text.index(after: brace))
+            text.insert(contentsOf: "\n  \"cleanupPeriodDays\": \(days)\(comma)", at: text.index(after: brace))
         } else {
             return "Не удалось разобрать файл настроек Claude Code"
         }
@@ -179,7 +213,7 @@ enum ExportReminder {
         }
         guard now.timeIntervalSince1970 - last > 30 * 24 * 3600 else { return }
         try? String(now.timeIntervalSince1970).write(to: file, atomically: true, encoding: .utf8)
-        Notifier.post("Бэкап ИИ — пора скачать экспорт",
-                      "claude.ai и ChatGPT: скачайте экспорт в настройках сайта и перетащите ZIP в окно программы. Подробно — «Как скачать?» в разделе «Источники».")
+        Notifier.post(tr("Бэкап ИИ — пора скачать экспорт"),
+                      tr("claude.ai и ChatGPT: скачайте экспорт в настройках сайта и перетащите ZIP в окно программы. Подробно — «Как скачать?» в разделе «Источники»."))
     }
 }

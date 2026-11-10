@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>AI Chat Backup</title>
+    <link>https://github.com/OzzyLabz/Ozzy-ai-chat-backup</link>
+    <description>AI Chat Backup updates</description>
+    <language>en</language>
+    <item>
+      <title>2.0</title>
+      <pubDate>Tue, 10 Nov 2026 11:41:04 +0000</pubDate>
+      <sparkle:version>200</sparkle:version>
+      <sparkle:shortVersionString>2.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+<li lang="ru">Вкладка «Навыки и настройки»: бэкап навыков, MCP, плагинов и инструкций ИИ-агентов</li>
+<li lang="ru">Интерфейс на 5 языках: Русский, English, 中文, 日本語, हिन्दी</li>
+<li lang="ru">Обновления прямо из программы</li>
+<li lang="en">“Skills & settings” tab: backs up skills, MCP, plugins and instructions of AI agents</li>
+<li lang="en">Interface in 5 languages: Русский, English, 中文, 日本語, हिन्दी</li>
+<li lang="en">Updates from inside the app</li>
+<li lang="zh">“技能与设置”标签页：备份 AI 智能体的技能、MCP、插件和说明</li>
+<li lang="zh">界面支持 5 种语言：Русский、English、中文、日本語、हिन्दी</li>
+<li lang="zh">可在程序内更新</li>
+<li lang="ja">「スキルと設定」タブ：AI エージェントのスキル、MCP、プラグイン、指示をバックアップ</li>
+<li lang="ja">画面は 5 言語に対応：Русский、English、中文、日本語、हिन्दी</li>
+<li lang="ja">アプリ内でアップデート</li>
+<li lang="hi">“कौशल और सेटिंग्स” टैब: एआई एजेंटों के कौशल, MCP, प्लगइन और निर्देशों का बैकअप</li>
+<li lang="hi">इंटरफ़ेस 5 भाषाओं में: Русский, English, 中文, 日本語, हिन्दी</li>
+<li lang="hi">ऐप के अंदर से अपडेट</li>
+</ul>
+]]></description>
+      <enclosure url="https://github.com/OzzyLabz/Ozzy-ai-chat-backup/releases/download/v2.0/Ozzy-AI-Chat-Backup.dmg" sparkle:edSignature="wPZHxYHoId+HRnmf/jZQM0YsEj2lxe16h4BUEv9lLuufvydeEHqQdWXW5WHKd9wrpD8KbZaX7oG9zyu3xAgPCQ==" length="12784103" type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>

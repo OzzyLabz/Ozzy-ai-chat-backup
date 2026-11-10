@@ -76,7 +76,7 @@ enum Fmt {
         }
         t = replace(t, " {2,}", " ").trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
         if t.count > 80 { t = String(t.prefix(80)).trimmingCharacters(in: .whitespaces) + "…" }
-        return t.isEmpty ? "Без названия" : t
+        return t.isEmpty ? AW.w("Без названия") : t
     }
 
     static func shortPath(_ path: String?) -> String {
@@ -95,16 +95,16 @@ enum Fmt {
         t = replace(t, "<command-name>(.*?)</command-name>", "$1")
         t = replace(t, "<command-args>(.*?)</command-args>", " $1")
         t = replace(t, "<in-app-browser-context[^>]*>.*?</in-app-browser-context>", "")
-        t = replace(t, "\\[Image: source: [^\\]]*\\]", "[изображение]")
-        t = replace(t, "<pasted_content[^>]*>", "\n〔вставленный текст〕\n")
-        t = replace(t, "</pasted_content[^>]*>", "\n〔конец вставки〕\n")
+        t = replace(t, "\\[Image: source: [^\\]]*\\]", NSRegularExpression.escapedTemplate(for: AW.w("[изображение]")))
+        t = replace(t, "<pasted_content[^>]*>", "\n" + NSRegularExpression.escapedTemplate(for: AW.w("〔вставленный текст〕")) + "\n")
+        t = replace(t, "</pasted_content[^>]*>", "\n" + NSRegularExpression.escapedTemplate(for: AW.w("〔конец вставки〕")) + "\n")
         t = replace(t, "<side-sessions-event>.*?(</side-sessions-event>|$)", "")
         t = questionReplies(t)
         if let r = t.range(of: "## My request[^\\n]*:", options: .regularExpression) {
             var files: [String] = []
             for line in t[..<r.lowerBound].split(separator: "\n") where line.hasPrefix("## ") {
                 let name = line.dropFirst(3).components(separatedBy: ": ").first ?? ""
-                if !name.isEmpty { files.append("[файл: \(name)]") }
+                if !name.isEmpty { files.append(AW.f("[файл: %@]", name)) }
             }
             t = files.joined(separator: "\n") + "\n\n" + t[r.upperBound...]
         }
@@ -124,7 +124,7 @@ enum Fmt {
                 for item in items {
                     let q = (item["question"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     let a = (item["answer"] as? String) ?? ((item["answers"] as? [Any])?.compactMap { $0 as? String }.joined(separator: ", ")) ?? ""
-                    lines.append((q.isEmpty ? "" : "**Вопрос:** \(q)\n") + "**Ответ:** \(a)")
+                    lines.append((q.isEmpty ? "" : "**\(AW.w("Вопрос:"))** \(q)\n") + "**\(AW.w("Ответ:"))** \(a)")
                 }
             }
             out.replaceSubrange(whole, with: lines.isEmpty ? String(text[inner]) : lines.joined(separator: "\n\n"))
@@ -160,7 +160,7 @@ enum Fmt {
                 if user, isInjected(t) { continue }
                 parts.append(user ? cleanUser(t) : t)
             } else if type.contains("image") {
-                parts.append("[изображение]")
+                parts.append(AW.w("[изображение]"))
             }
         }
         return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")

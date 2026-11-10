@@ -5,14 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 # --- Настройки этой программы ---
-APP="$ROOT/../Бэкап ИИ/dist/Бэкап ИИ.app"
-VOL="Бэкап ИИ"
+APP="$ROOT/../Бэкап ИИ/dist/AI Chat Backup.app"
+VOL="AI Chat Backup"
 OUT_NAME="Ozzy-AI-Chat-Backup.dmg"
 ICON_Y=300
 EXTRA=""
 # --------------------------------
 
-LINK="Программы"
+LINK="Applications"   # Finder сам показывает его на языке системы (у русских — «Программы»)
 BG="$ROOT/dmg/background.png"
 OUT="$ROOT/dist/$OUT_NAME"
 [ -d "$APP" ] || { echo "Нет программы: $APP"; exit 1; }

@@ -16,7 +16,7 @@ struct SessionRef {
 struct SourceScan {
     var found = false
     var refs: [SessionRef] = []
-    var problems: [String] = []
+    var problems: [Msg] = []
 }
 
 func fileStamp(_ url: URL) -> (Int64, Double) {
@@ -145,17 +145,17 @@ enum CodexScan {
                 return s
             })
         }
-        if skippedZst > 0 { scan.problems.append("\(skippedZst) сжатых сессий пропущено: нет утилиты zstd") }
+        if skippedZst > 0 { scan.problems.append(Msg("%@ сжатых сессий пропущено: нет утилиты zstd", ["\(skippedZst)"])) }
 
         // 2. База истории: разговоры, у которых нет файла.
         guard let histPath = newest(root, prefix: "thread_history") else { return scan }
         guard let hist = SQLiteDB(histPath) else {
-            scan.problems.append("база Codex не открывается")
+            scan.problems.append(Msg("база Codex не открывается"))
             return scan
         }
         let cols = hist.columns("thread_items")
         guard cols.isSuperset(of: ["thread_id", "item_type", "item_json"]) else {
-            scan.problems.append("формат базы Codex изменился")
+            scan.problems.append(Msg("формат базы Codex изменился"))
             return scan
         }
         let order = cols.contains("rollout_ordinal") ? "rollout_ordinal" : "rowid"
@@ -233,7 +233,7 @@ enum DSHScan {
                 })
             }
         }
-        if skipped > 0 { scan.problems.append("\(skipped) сжатых сессий пропущено: нет утилиты zstd") }
+        if skipped > 0 { scan.problems.append(Msg("%@ сжатых сессий пропущено: нет утилиты zstd", ["\(skipped)"])) }
         return scan
     }
 
@@ -298,9 +298,9 @@ enum HermesScan {
         guard !dbs.isEmpty else { return SourceScan() }
         var scan = SourceScan(found: true)
         for (profile, path) in dbs {
-            guard let db = SQLiteDB(path) else { scan.problems.append("база Hermes «\(profile)» не открывается"); continue }
+            guard let db = SQLiteDB(path) else { scan.problems.append(Msg("база Hermes «%@» не открывается", [profile])); continue }
             let mcols = db.columns("messages")
-            guard mcols.isSuperset(of: ["session_id", "role", "content"]) else { scan.problems.append("формат базы Hermes изменился"); continue }
+            guard mcols.isSuperset(of: ["session_id", "role", "content"]) else { scan.problems.append(Msg("формат базы Hermes изменился")); continue }
             let tcol = mcols.contains("timestamp") ? "timestamp" : "0"
             var sessions: [String: [String: Any]] = [:]
             for r in db.rows("select * from sessions") ?? [] { if let id = r["id"] as? String { sessions[id] = r } }
@@ -453,7 +453,7 @@ enum WebScan {
         guard let data = try? Data(contentsOf: url) else { return SourceScan() }
         var scan = SourceScan(found: true)
         guard let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-            scan.problems.append("импортированный файл не читается")
+            scan.problems.append(Msg("импортированный файл не читается"))
             return scan
         }
         for c in list {
@@ -528,7 +528,7 @@ enum WebScan {
                     var parts: [String] = []
                     for p in content["parts"] as? [Any] ?? [] {
                         if let s = p as? String { parts.append(s) }
-                        else if let d = p as? [String: Any], (d["content_type"] as? String ?? "").contains("image") { parts.append("[изображение]") }
+                        else if let d = p as? [String: Any], (d["content_type"] as? String ?? "").contains("image") { parts.append(AW.w("[изображение]")) }
                     }
                     text = parts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
                 }
@@ -559,7 +559,7 @@ enum WebScan {
             var text = Fmt.blocks(m["content"], user: user)
             if text.isEmpty { text = (m["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
             let files = ((m["attachments"] as? [[String: Any]] ?? []) + (m["files"] as? [[String: Any]] ?? []))
-                .compactMap { $0["file_name"] as? String }.map { "[вложение: \($0)]" }
+                .compactMap { $0["file_name"] as? String }.map { AW.f("[вложение: %@]", $0) }
             if !files.isEmpty { text = (files + [text]).filter { !$0.isEmpty }.joined(separator: "\n") }
             nodes[id] = Node(id: id, parent: m["parent_message_uuid"] as? String, children: [],
                              role: user ? .user : (sender == "assistant" ? .assistant : nil), text: text,
@@ -598,8 +598,8 @@ enum WebImport {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
             p.arguments = ["-x", "-k", url.path, dir.path]
-            do { try p.run(); p.waitUntilExit() } catch { return (false, "Не удалось распаковать архив") }
-            guard p.terminationStatus == 0 else { return (false, "Не удалось распаковать архив") }
+            do { try p.run(); p.waitUntilExit() } catch { return (false, tr("Не удалось распаковать архив")) }
+            guard p.terminationStatus == 0 else { return (false, tr("Не удалось распаковать архив")) }
             tmp = dir
             base = dir
         }
@@ -613,7 +613,7 @@ enum WebImport {
                 jsonFiles.append(f)
             }
         }
-        guard !jsonFiles.isEmpty else { return (false, "В этом файле нет переписок (conversations.json). Нужен экспорт из настроек claude.ai или ChatGPT.") }
+        guard !jsonFiles.isEmpty else { return (false, tr("В этом файле нет переписок (conversations.json). Нужен экспорт из настроек claude.ai или ChatGPT.")) }
 
         var byKind: [SourceKind: [[String: Any]]] = [:]
         for f in jsonFiles.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
@@ -622,7 +622,7 @@ enum WebImport {
             let kind: SourceKind? = first["mapping"] != nil ? .chatgpt : (first["chat_messages"] != nil ? .claudeai : nil)
             if let kind { byKind[kind, default: []] += list }
         }
-        guard !byKind.isEmpty else { return (false, "Формат файла не похож ни на экспорт claude.ai, ни на экспорт ChatGPT.") }
+        guard !byKind.isEmpty else { return (false, tr("Формат файла не похож ни на экспорт claude.ai, ни на экспорт ChatGPT.")) }
 
         try? fm.createDirectory(at: Paths.imports, withIntermediateDirectories: true)
         var report: [String] = []
@@ -637,8 +637,8 @@ enum WebImport {
             for c in list { let id = WebScan.convID(c, kind); if merged[id] == nil { order.append(id) }; merged[id] = c }
             let all = order.compactMap { merged[$0] }
             if let data = try? JSONSerialization.data(withJSONObject: all) { try? data.write(to: target, options: .atomic) }
-            report.append("\(kind.title): \(list.count) разговоров")
+            report.append("\(kind.title): \(list.count) \(plural(list.count, "разговор", "разговора", "разговоров"))")
         }
-        return (true, "Импортировано — " + report.joined(separator: ", ") + ".")
+        return (true, trf("Импортировано — %@.", report.joined(separator: ", ")))
     }
 }
