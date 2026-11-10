@@ -429,5 +429,7 @@
  "формат базы Hermes изменился": "the Hermes database format has changed",
  "формат не понятен — текст не найден ни в одной сессии": "format not recognized — no text found in any session",
  "формат понятен": "format OK",
- "История ИИ": "AI chat history"
+ "История ИИ": "AI chat history",
+ "Ключи в ней скрываются по настройке «Ключи и пароли в конфигах». Пароль, записанный обычными словами, программа не узнает.": "Keys in it are hidden according to the “Keys and passwords in configs” setting. A password written in plain words won’t be recognized.",
+ "выключено в программе — копия сохранена, но не обновляется": "turned off in the app — the copy is kept but no longer updated"
 }

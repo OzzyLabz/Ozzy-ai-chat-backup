@@ -120,6 +120,7 @@ enum KitEvent {
         "copy.restored": "правка в копии заменена точной копией: %@",
         "nochange": "без изменений",
         "gone": "не найдено — программа удалена или папка перенесена",
+        "off": "выключено в программе — копия сохранена, но не обновляется",
         "unreadable": "не удалось прочитать настройки",
         "folder.error": "нет доступа к папке навыков: %@",
         "first": "первое сохранение: %@"
@@ -148,6 +149,7 @@ struct KitState: Codable {
     var sources: [String: String] = [:]    // путь → отпечаток источника в прошлый раз
     var mcp: [String] = []
     var plugins: [String] = []
+    var offSeen: [String]?                 // выключенные в программе (id агента, «own:имя»): об этом уже написано в журнале
     static var url: URL { Paths.support.appendingPathComponent("kit-state.json") }
     static func load() -> KitState { JSONFile.load(KitState.self, from: url) ?? KitState() }
     func save() { JSONFile.save(self, to: Self.url) }
@@ -628,24 +630,30 @@ final class KitBackup {
     }
 
     // Записать файл или папку как точную копию, с учётом «_прежних».
-    // key — путь внутри «Навыки и MCP»; srcHash — отпечаток источника.
+    // key — путь внутри «Навыки и MCP»; srcHash — отпечаток того, что записывается.
+    // raw — отпечаток самого файла агента (у конфигов, где записываемое зависит от режима ключей):
+    // если файл агента прежний и сменился только режим ключей, копия перезаписывается без «_прежних».
     @discardableResult
-    func put(_ key: String, write: (URL) throws -> Void, srcHash: String, who: String, kind: String, label: String) -> Bool {
+    func put(_ key: String, write: (URL) throws -> Void, srcHash: String, raw: String? = nil, who: String, kind: String, label: String) -> Bool {
         let target = dest.appendingPathComponent(key)
         let had = fm.fileExists(atPath: target.path)
         let prevSrc = state.sources[key]
         let prevWritten = state.units[key]
-        newState.sources[key] = srcHash
-        if had, prevSrc == srcHash, let w = prevWritten, KitHash.item(target) == w {
+        newState.sources[key] = raw ?? srcHash
+        // Прежний отпечаток мог быть записан по-старому (по записанному) — считаем его тем же источником.
+        let sameSource = prevSrc != nil && (prevSrc == (raw ?? srcHash) || prevSrc == srcHash)
+        if had, sameSource, let w = prevWritten, KitHash.item(target) == w, raw == nil || w == srcHash {
             newState.units[key] = w
             return false                                        // ничего не поменялось
         }
         if had {
             let current = KitHash.item(target)
-            let userEdited = prevWritten != nil && current != prevWritten && prevSrc == srcHash
+            let userEdited = prevWritten != nil && current != prevWritten && sameSource
             if userEdited {
                 log(who, "copy.restored", [label])
-            } else if prevSrc != nil && prevSrc != srcHash {
+            } else if sameSource {
+                log(who, "\(kind).update", [label])             // сменился только режим ключей
+            } else if prevSrc != nil {
                 if config.kitKeepPrev { movePrev(key) }
                 log(who, "\(kind).update" + (config.kitKeepPrev ? ".prev" : ""), [label])
             } else if prevSrc == nil {
@@ -659,6 +667,76 @@ final class KitBackup {
         do { try write(target) } catch { changes.append(DemoChange(date: now, who: who, text: error.localizedDescription, level: .err)) }
         newState.units[key] = KitHash.item(target)
         return true
+    }
+
+    // Текстовые файлы «Своих папок», в которых ищутся ключи (остальные копируются как есть).
+    static let ownTextExt: Set<String> = ["md", "markdown", "txt", "json", "toml", "yaml", "yml", "ini", "cfg", "conf",
+                                          "csv", "xml", "html", "js", "ts", "py", "sh", "zsh", "swift", "rb", "go"]
+
+    // Своя папка: копия по режиму ключей. Смена только режима — перезапись без «_прежних».
+    func putOwn(_ key: String, src: URL, who: String) {
+        let mode = config.kitKeys
+        let raw = KitHash.tree(src)
+        let tag = raw + "|" + mode
+        let target = dest.appendingPathComponent(key)
+        let had = fm.fileExists(atPath: target.path)
+        let prev = state.sources[key]
+        let prevW = state.units[key]
+        let prevRaw = prev?.components(separatedBy: "|").first
+        newState.sources[key] = tag
+        if had, prev == tag, let w = prevW, KitHash.item(target) == w { newState.units[key] = w; return }
+        if had {
+            if prevRaw == raw {
+                if prev == tag { log(who, "copy.restored", [who]) }          // правка копии — возвращаем точную
+                else if prev?.contains("|") == true { log(who, "file.update", [who]) }   // сменился только режим ключей
+            } else if prev != nil {
+                if config.kitKeepPrev { movePrev(key) }
+                log(who, "file.update" + (config.kitKeepPrev ? ".prev" : ""), [who])
+            } else {
+                log(who, "file.new", [who])
+            }
+            try? fm.removeItem(at: target)
+        } else {
+            log(who, "file.new", [who])
+        }
+        do { try copyTreeKeys(src, to: target) } catch { changes.append(DemoChange(date: now, who: who, text: error.localizedDescription, level: .err)) }
+        newState.units[key] = KitHash.item(target)
+    }
+
+    func copyTreeKeys(_ src: URL, to target: URL) throws {
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        for rel in KitHash.files(src) {
+            let from = src.appendingPathComponent(rel)
+            let t = target.appendingPathComponent(rel)
+            try fm.createDirectory(at: t.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let ext = (rel as NSString).pathExtension.lowercased()
+            guard config.kitKeys != "keep", Self.ownTextExt.contains(ext), let data = try? Data(contentsOf: from) else {
+                try fm.copyItem(at: from, to: t); continue
+            }
+            let (out, _) = KitKeys.apply(data, format: ext == "json" ? "json" : "text", mode: config.kitKeys)
+            if let out { try out.write(to: t) }                                  // «Не сохранять»: файл с ключами пропускается
+        }
+    }
+
+    func scrubPrevious() {
+        guard config.kitKeys != "keep" else { return }
+        let prevRoot = dest.appendingPathComponent(KitNames.previous)
+        // Инструкции агентов — только файлы настроек (те же, что в копии проходят через режим ключей);
+        // свои папки — текстовые файлы.
+        let roots: [(URL, Set<String>)] = [(prevRoot.appendingPathComponent(KitNames.instructions), ["json", "toml", "yaml", "yml"]),
+                                           (prevRoot.appendingPathComponent(KitNames.own), Self.ownTextExt)]
+        for (root, exts) in roots {
+            guard let e = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { continue }
+            for case let u as URL in e {
+                let ext = u.pathExtension.lowercased()
+                guard exts.contains(ext),
+                      (try? u.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                      let data = try? Data(contentsOf: u) else { continue }
+                let (out, n) = KitKeys.apply(data, format: ext == "json" ? "json" : "text", mode: config.kitKeys)
+                guard n > 0 else { continue }
+                if let out { if out != data { try? out.write(to: u, options: .atomic) } } else { try? fm.removeItem(at: u) }
+            }
+        }
     }
 
     func movePrev(_ key: String) {
@@ -724,8 +802,17 @@ final class KitBackup {
                     out = d
                     _ = n
                 }
-                guard let payload = out else { continue }   // «Не сохранять»: файл с ключами пропускаем
-                put(key, write: { try payload.write(to: $0) }, srcHash: KitHash.data(payload), who: s.spec.name, kind: "file", label: f.dest)
+                guard let payload = out else {
+                    // «Не сохранять»: файл с ключами не копируется; прежняя копия (могла быть с ключами) убирается совсем.
+                    let target = dest.appendingPathComponent(key)
+                    if fm.fileExists(atPath: target.path) {
+                        try? fm.removeItem(at: target)
+                        log(s.spec.name, "file.remove", [f.dest])
+                    }
+                    continue
+                }
+                put(key, write: { try payload.write(to: $0) }, srcHash: KitHash.data(payload),
+                    raw: f.config == nil ? nil : KitHash.data(data), who: s.spec.name, kind: "file", label: f.dest)
             }
         }
 
@@ -738,13 +825,48 @@ final class KitBackup {
             }
         }
 
-        // 4. Свои папки (например, AI-Memory) — целиком.
+        var goneOwn: Set<String> = []          // своя папка не найдена (например, диск не подключён) — копию не трогаем
+        // 4. Свои папки (например, AI-Memory) — целиком; ключи в текстовых файлах — по выбранному режиму.
         for o in config.kitOwn where !config.kitOff.contains("own:" + o.path) {
             let src = URL(fileURLWithPath: o.path, isDirectory: true)
-            guard KitReader.isDir(src) else { log(o.name, "gone", [], .warn); continue }
-            let key = "\(KitNames.own)/\(safe(o.name))"
-            put(key, write: { try self.copyTree(src, to: $0) }, srcHash: KitHash.tree(src), who: o.name, kind: "file", label: o.name)
+            guard KitReader.isDir(src) else { log(o.name, "gone", [], .warn); goneOwn.insert("own:" + safe(o.name)); continue }
+            putOwn("\(KitNames.own)/\(safe(o.name))", src: src, who: o.name)
         }
+
+        // 5а. Выключенное в программе (агент выключен, своя папка выключена или убрана из списка):
+        // прежняя копия остаётся как есть и просто не обновляется — не «удалено», без «_прежних» и без дублей.
+        let offScans = all.filter { config.kitOff.contains($0.spec.id) }
+        let offSkills = Set(offScans.flatMap { $0.skills.map(\.name) })
+        var offSeen: [String] = []
+        func frozen(_ key: String) -> String? {
+            let parts = key.split(separator: "/", maxSplits: 2).map(String.init)
+            guard parts.count >= 2 else { return nil }
+            if parts[0] == KitNames.instructions || parts[0] == KitNames.pluginFiles {
+                return offScans.first { $0.spec.name == parts[1] }?.spec.id
+            }
+            if parts[0] == KitNames.own { return "own:" + parts[1] }        // активные свои папки сюда не попадают
+            if parts[0] == KitNames.skills {
+                let folder = parts[1]
+                if let open = folder.range(of: " ("), folder.hasSuffix(")") {
+                    let who = folder[open.upperBound..<folder.index(before: folder.endIndex)].components(separatedBy: ", ")
+                    return offScans.first { who.contains($0.spec.name) }?.spec.id
+                }
+                return offSkills.contains(folder) ? offScans.first { s in s.skills.contains { $0.name == folder } }?.spec.id : nil
+            }
+            return nil
+        }
+        for key in state.units.keys where newState.units[key] == nil {
+            guard let tag = frozen(key), fm.fileExists(atPath: dest.appendingPathComponent(key).path) else { continue }
+            newState.units[key] = state.units[key]
+            newState.sources[key] = state.sources[key]
+            if !offSeen.contains(tag) { offSeen.append(tag) }
+        }
+        let seenBefore = Set(state.offSeen ?? [])
+        for tag in offSeen where !seenBefore.contains(tag) && !goneOwn.contains(tag) {
+            let who = tag.hasPrefix("own:") ? String(tag.dropFirst(4)) : (offScans.first { $0.spec.id == tag }?.spec.name ?? tag)
+            log(who, "off")
+        }
+        newState.offSeen = offSeen
 
         // 5. Исчезнувшее у агентов: одна прошлая версия — в «_прежние».
         for key in state.units.keys where newState.units[key] == nil {
@@ -756,9 +878,14 @@ final class KitBackup {
                 (isSkill ? "skill.remove" : "file.remove") + (config.kitKeepPrev ? ".prev" : ""), [(key as NSString).lastPathComponent])
         }
 
+        // 5а. Ключи в «_прежних»: если сейчас не «как есть», прошлые версии инструкций и настроек
+        // не должны хранить настоящие ключи — скрываем их (или убираем такие файлы при «Не сохранять»).
+        scrubPrevious()
+
         // 6. Списки MCP и плагинов, обзор.
-        writeMCP(on)
-        writePlugins(on)
+        // Выключенные агенты остаются в общих списках MCP и плагинов (их копия не убирается).
+        writeMCP(on + offScans)
+        writePlugins(on + offScans)
         writeOverview(on, skills: skillRows)
 
         if first && !changes.isEmpty {

@@ -585,7 +585,8 @@ extension ViewModel {
             panel.canChooseDirectories = true
             panel.canChooseFiles = false
             panel.prompt = tr("Добавить")
-            panel.message = tr("Своя папка, которую сохранять вместе с навыками (например, память агентов)")
+            panel.message = tr("Своя папка, которую сохранять вместе с навыками (например, память агентов)") + "\n"
+                + tr("Ключи в ней скрываются по настройке «Ключи и пароли в конфигах». Пароль, записанный обычными словами, программа не узнает.")
             guard panel.runModal() == .OK, let url = panel.url else { return }
             let path = url.path
             self.askFolderName(url.lastPathComponent, text: tr("Так будет называться папка в «Свои папки».")) { name in
