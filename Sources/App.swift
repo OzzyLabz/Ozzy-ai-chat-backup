@@ -650,6 +650,25 @@ final class ViewModel: ObservableObject {
         }
     }
 
+    // «Другая программа…» для папки навыков — как у «Папки архива».
+    func chooseKitOpenApp() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = tr("Выбрать")
+        panel.message = tr("Выбрать программу для папки навыков")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let id = Bundle(url: url)?.bundleIdentifier
+        update {
+            if let id, Self.folderApps.contains(id) || id == "com.apple.finder" || id == "md.obsidian" {
+                $0.kitOpenWith = id == "com.apple.finder" ? "finder" : (id == "md.obsidian" ? "obsidian" : id)
+            } else {
+                if !$0.customApps.contains(url.path) { $0.customApps.append(url.path) }
+                $0.kitOpenWith = url.path
+            }
+        }
+    }
+
     func openJournal() {
         let url = config.archiveURL.appendingPathComponent(AW.journalFile)
         if FileManager.default.fileExists(atPath: url.path) {
@@ -662,8 +681,11 @@ final class ViewModel: ObservableObject {
     // Obsidian: архив в хранилище → открыть журнал в нём; иначе — подсказка.
     enum ObsidianState { case vault(String), notVault, notInstalled }
 
-    var obsidianState: ObsidianState {
-        if let vault = Obsidian.vault(containing: config.archiveURL) { return .vault(vault) }
+    var obsidianState: ObsidianState { obsidianState(for: config.archiveURL) }
+
+    // То же для любой папки (папка навыков показывает подпись так же, как «Папка архива»).
+    func obsidianState(for url: URL) -> ObsidianState {
+        if let vault = Obsidian.vault(containing: url) { return .vault(vault) }
         let installed = URL(string: "obsidian://").flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) } != nil
         return installed ? .notVault : .notInstalled
     }
@@ -1607,7 +1629,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Тестовая сборка: без уведомлений и напоминаний.
+        // Как в 1.0: разрешение на уведомления и напоминание об экспорте. Тестовая сборка — без них.
+        if !Paths.isTest {
+            Notifier.requestPermission()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) { ExportReminder.checkAndNotify() }
+        }
         registerFonts()
         buildMainMenu()
         buildStatusItem()

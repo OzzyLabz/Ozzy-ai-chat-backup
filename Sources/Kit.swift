@@ -730,10 +730,24 @@ struct KitView: View {
 
     @ViewBuilder private var kitNote: some View {
         let link = Color(red: 0.81, green: 0.78, blue: 1)
-        if let vault = Obsidian.vault(containing: vm.kitURL) {
+        // Три случая — как под «Папкой архива».
+        switch vm.obsidianState(for: vm.kitURL) {
+        case .vault(let vault):
             Text(trf("Хранилище Obsidian «%@»", (vault as NSString).lastPathComponent)).font(.bellota(13, bold: false)).foregroundColor(link)
-        } else {
-            Text(tr("Отдельно от «Истории ИИ»")).font(.bellota(13, bold: false)).foregroundColor(Palette.dim)
+        case .notVault:
+            HStack(spacing: 6) {
+                Text(tr("Не в хранилище Obsidian")).foregroundColor(Palette.dim)
+                Text("·").foregroundColor(Palette.dim)
+                LinkButton(title: tr("открыть в Obsidian как хранилище")) { vm.chooseObsidianVault() }
+            }
+            .font(.bellota(13, bold: false)).lineLimit(1)
+        case .notInstalled:
+            HStack(spacing: 6) {
+                Text(tr("Удобно читать в Obsidian, он бесплатный")).foregroundColor(Palette.dim)
+                Text("·").foregroundColor(Palette.dim)
+                LinkButton(title: tr("скачать")) { vm.downloadObsidian() }
+            }
+            .font(.bellota(13, bold: false)).lineLimit(1)
         }
     }
 
@@ -905,6 +919,8 @@ struct KitOpenWithButton: View {
                     }
                 }
                 .pickerStyle(.inline).labelsHidden()
+                Divider()
+                Button(tr("Другая программа…")) { vm.chooseKitOpenApp() }
             } label: {
                 Text("▾").font(.bellota(14)).foregroundColor(.white)
             }
